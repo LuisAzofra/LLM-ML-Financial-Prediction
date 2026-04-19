@@ -1,0 +1,41 @@
+﻿2026-03-20 19:16:01,723 - __main__ - INFO - ================================================================================
+2026-03-20 19:16:01,725 - __main__ - INFO - SISTEMA H├ìBRIDO ML + LLM PARA PREDICCI├ôN FINANCIERA
+2026-03-20 19:16:01,725 - __main__ - INFO - Versi├│n 2.0 - Datos Reales, LLM Gratuito, GARCH
+2026-03-20 19:16:01,725 - __main__ - INFO - ================================================================================
+2026-03-20 19:16:01,726 - __main__ - INFO - 
+Configuraci├│n:
+2026-03-20 19:16:01,726 - __main__ - INFO -   Per├¡odo: 2023-03-21 a 2026-03-20
+2026-03-20 19:16:01,726 - __main__ - INFO -   S├¡mbolos: ['AAPL', 'MSFT']
+2026-03-20 19:16:01,726 - __main__ - INFO -   LLM: ollama
+2026-03-20 19:16:01,726 - __main__ - INFO - 
+################################################################################
+2026-03-20 19:16:01,726 - __main__ - INFO - PROCESANDO: AAPL
+2026-03-20 19:16:01,726 - __main__ - INFO - ################################################################################
+2026-03-20 19:16:01,726 - __main__ - INFO - 
+======================================================================
+2026-03-20 19:16:01,726 - __main__ - INFO - CARGA DE DATOS REALES: AAPL
+2026-03-20 19:16:01,726 - __main__ - INFO - ======================================================================
+2026-03-20 19:16:01,727 - data.data_loader - INFO - Descargando datos de AAPL...
+2026-03-20 19:16:01,825 - yfinance - ERROR - Failed to get ticker 'AAPL' reason: Failed to perform, curl: (77) error setting certificate verify locations:  CAfile: C:\Users\luisa\Downloads\Kimi_Agent_Optimizaci├│n TFG IA Financiera\tfg_finance_ai\venv\Lib\site-packages\certifi\cacert.pem CApath: none. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-20 19:16:01,835 - data.data_loader - ERROR - Error descargando AAPL: Failed to perform, curl: (77) error setting certificate verify locations:  CAfile: C:\Users\luisa\Downloads\Kimi_Agent_Optimizaci├│n TFG IA Financiera\tfg_finance_ai\venv\Lib\site-packages\certifi\cacert.pem CApath: none. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-20 19:16:01,845 - __main__ - ERROR - ÔØî No se pudieron cargar datos para AAPL
+2026-03-20 19:16:01,846 - __main__ - WARNING - Saltando AAPL por falta de datos
+2026-03-20 19:16:01,847 - __main__ - INFO - 
+################################################################################
+2026-03-20 19:16:01,847 - __main__ - INFO - PROCESANDO: MSFT
+2026-03-20 19:16:01,847 - __main__ - INFO - ################################################################################
+2026-03-20 19:16:01,847 - __main__ - INFO - 
+======================================================================
+2026-03-20 19:16:01,847 - __main__ - INFO - CARGA DE DATOS REALES: MSFT
+2026-03-20 19:16:01,847 - __main__ - INFO - ======================================================================
+2026-03-20 19:16:01,847 - data.data_loader - INFO - Descargando datos de MSFT...
+2026-03-20 19:16:01,860 - yfinance - ERROR - Failed to get ticker 'MSFT' reason: Failed to perform, curl: (77) error setting certificate verify locations:  CAfile: C:\Users\luisa\Downloads\Kimi_Agent_Optimizaci├│n TFG IA Financiera\tfg_finance_ai\venv\Lib\site-packages\certifi\cacert.pem CApath: none. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-20 19:16:01,876 - data.data_loader - ERROR - Error descargando MSFT: Failed to perform, curl: (77) error setting certificate verify locations:  CAfile: C:\Users\luisa\Downloads\Kimi_Agent_Optimizaci├│n TFG IA Financiera\tfg_finance_ai\venv\Lib\site-packages\certifi\cacert.pem CApath: none. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-20 19:16:01,876 - __main__ - ERROR - ÔØî No se pudieron cargar datos para MSFT
+2026-03-20 19:16:01,877 - __main__ - WARNING - Saltando MSFT por falta de datos
+2026-03-20 19:16:01,877 - __main__ - INFO - 
+================================================================================
+2026-03-20 19:16:01,877 - __main__ - INFO - AN├üLISIS COMPLETADO
+2026-03-20 19:16:01,877 - __main__ - INFO - ================================================================================
+2026-03-20 19:16:01,877 - __main__ - INFO - 
+Ô£à Resultados guardados en: C:\Users\luisa\Downloads\Kimi_Agent_Optimizaci├│n TFG IA Financiera\tfg_finance_ai\results

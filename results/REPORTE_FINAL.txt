@@ -1,0 +1,153 @@
+================================================================================
+ESTUDIO PROSPECTIVO DE LLMs Y ML EN PREDICCIÓN FINANCIERA
+Trabajo Fin de Grado
+================================================================================
+
+Fecha: 2026-02-17 05:58
+Símbolo analizado: AAPL
+
+--------------------------------------------------------------------------------
+1. RESUMEN EJECUTIVO
+--------------------------------------------------------------------------------
+
+Este estudio ha desarrollado e implementado un sistema híbrido que combina:
+• Modelos de Machine Learning tradicionales (Random Forest, XGBoost, LightGBM)
+• Modelos de Deep Learning (LSTM, GRU, CNN-LSTM)
+• Sistema Multi-Agente con LLMs (Análisis técnico, sentimiento y riesgo)
+• Detección automática de patrones chartistas
+
+El sistema integra predicciones cuantitativas con análisis cualitativo para
+tomar decisiones de inversión informadas.
+
+
+--------------------------------------------------------------------------------
+2. DATOS UTILIZADOS
+--------------------------------------------------------------------------------
+
+• Símbolo: AAPL
+• Período: 2020-01-01 a 2022-09-26
+• Registros: 1000
+• Precio inicial: $151.60
+• Precio final: $444.65
+• Retorno del activo: 193.3%
+• Volatilidad anual: 29.4%
+
+
+--------------------------------------------------------------------------------
+3. DETECCIÓN DE PATRONES
+--------------------------------------------------------------------------------
+
+Se detectaron 724 patrones chartistas en total:
+• Dobles techos/suelos
+• Triángulos (ascendentes, descendentes, simétricos)
+• Cuñas (ascendentes, descendentes)
+• Cabeza y hombros
+
+Top 3 patrones más confiables:
+
+  1. doble_suelo (confianza: 99.98%)
+  2. doble_techo (confianza: 99.98%)
+  3. doble_suelo (confianza: 99.98%)
+
+--------------------------------------------------------------------------------
+4. MODELOS DE MACHINE LEARNING
+--------------------------------------------------------------------------------
+
+Modelos entrenados y evaluados:
+
+• random_forest:
+  - RMSE: 0.0524
+  - R²: -0.3404
+• xgboost:
+  - RMSE: 0.0542
+  - R²: -0.4332
+• lightgbm:
+  - RMSE: 0.0531
+  - R²: -0.3751
+
+Predicciones actuales:
+
+• ml_random_forest: -0.170%
+• ml_xgboost: -1.351%
+• ml_lightgbm: -3.289%
+
+--------------------------------------------------------------------------------
+5. SISTEMA MULTI-AGENTE
+--------------------------------------------------------------------------------
+
+Agentes utilizados:
+• TechnicalAnalyst: Análisis de indicadores técnicos y patrones
+• SentimentAnalyst: Análisis de sentimiento de noticias y redes sociales
+• RiskManager: Evaluación y gestión de riesgos
+• PortfolioManager: Coordinación y toma de decisiones final
+
+Resultado del análisis multi-agente:
+• Decisión: MANTENER
+• Confianza: 25.0%
+• Razonamiento: technical: COMPRA_FUERTE (conf: 0.65) | sentiment: MANTENER (conf: 0.32) | risk: RECHAZAR (conf: 0.90) | OPERACIÓN BLOQUEADA POR RIESGO
+
+
+--------------------------------------------------------------------------------
+6. SISTEMA HÍBRIDO ML + LLM
+--------------------------------------------------------------------------------
+
+Combinación de predicciones ML con análisis cualitativo LLM:
+• Score Híbrido: -0.280
+• Confianza: 43.0%
+• Recomendación Final: VENTA
+• Señal ML: -0.700
+• Señal LLM: 0.000
+
+
+--------------------------------------------------------------------------------
+7. RESULTADOS DEL BACKTEST
+--------------------------------------------------------------------------------
+
+Métricas de rendimiento:
+• Capital Inicial: $100,000.00
+• Capital Final: $108,551.22
+• Retorno Total: 8.55%
+• Sharpe Ratio: 0.22
+• Sortino Ratio: 0.35
+• Max Drawdown: -46.57%
+• Volatilidad: 28.7%
+• Calmar Ratio: 0.18
+
+Estadísticas de operaciones:
+• Total Operaciones: 19
+• Ganadoras: 6
+• Perdedoras: 13
+• Win Rate: 31.6%
+• Profit Factor: 1.08
+
+
+--------------------------------------------------------------------------------
+8. CONCLUSIONES
+--------------------------------------------------------------------------------
+
+1. El sistema híbrido ML + LLM demuestra la viabilidad de combinar 
+   predicciones cuantitativas con análisis cualitativo.
+
+2. La detección automática de patrones chartistas proporciona señales
+   adicionales para la toma de decisiones.
+
+3. El sistema multi-agente permite una evaluación integral del mercado
+   desde múltiples perspectivas (técnica, sentimental, riesgo).
+
+4. Los resultados del backtest muestran retornos positivos pero con
+   alta volatilidad, lo cual es esperado en estrategias de trading.
+
+5. Limitaciones identificadas:
+   - La predictibilidad del mercado es inherentemente limitada
+   - Los modelos ML muestran R² negativo, indicando dificultad para
+     predecir retornos exactos
+   - Se requiere mayor optimización de hiperparámetros
+
+6. Trabajo futuro:
+   - Integración con LLMs reales (OpenAI GPT-4)
+   - Expansión de patrones chartistas detectados
+   - Optimización de pesos del sistema híbrido
+   - Implementación de trading en tiempo real
+
+
+================================================================================

@@ -1,0 +1,32 @@
+{
+  "initial_capital": 100000.0,
+  "cash": 94955.82166080001,
+  "created_at": "2026-04-07T17:19:49.072155+00:00",
+  "positions": {
+    "BTC-USD": {
+      "symbol": "BTC-USD",
+      "asset_type": "crypto",
+      "action": "SHORT",
+      "shares": 0.02685383,
+      "entry_price": 70753.40625,
+      "entry_date": "2026-04-13T21:32:34.785230+00:00",
+      "position_value_at_entry": 1900.0,
+      "signal_strength": 0.0,
+      "predicted_return_pct": 0.0,
+      "entry_reason": "MANUAL"
+    },
+    "SOL-USD": {
+      "symbol": "SOL-USD",
+      "asset_type": "crypto",
+      "action": "LONG",
+      "shares": 36.22506015,
+      "entry_price": 86.656563,
+      "entry_date": "2026-04-14T20:54:45.933683+00:00",
+      "position_value_at_entry": 3139.14,
+      "signal_strength": 0.0,
+      "predicted_return_pct": 0.0,
+      "entry_reason": "MANUAL"
+    }
+  },
+  "trade_history": []
+}

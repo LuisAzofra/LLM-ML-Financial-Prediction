@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sovereign Analyst — Institutional AI Prediction</title>
+  <meta name="description" content="Institutional-grade financial analysis powered by hybrid ML + LLM intelligence.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="index.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     TOP NAVIGATION
+════════════════════════════════════════════ -->
+<nav id="topnav">
+  <div class="nav-left">
+    <div class="nav-logo">
+      <svg class="logo-diamond" viewBox="0 0 20 20" fill="none">
+        <polygon points="10,1 19,10 10,19 1,10" fill="#0dcfcf" opacity="0.9"/>
+      </svg>
+      Sovereign Analyst
+    </div>
+    <ul class="nav-links">
+      <li><a href="#" class="nav-link active" data-view="analysis">Home</a></li>
+      <li><a href="#" class="nav-link" data-view="backtest">Test With The Past</a></li>
+      <li><a href="#" class="nav-link" data-view="bot">Trading Bot</a></li>
+    </ul>
+  </div>
+  <div class="nav-right">
+    <span id="ollama-status-badge"
+          style="font-size:12px;font-weight:500;color:#94a3b8;cursor:default;white-space:nowrap;"
+          title="Verificando estado de Ollama...">⏳ LLM: Verificando...</span>
+    <button class="nav-icon-btn" title="Notifications">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/>
+      </svg>
+    </button>
+    <div class="nav-avatar">SA</div>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════════════════════
+     HERO HEADING
+════════════════════════════════════════════ -->
+<div id="hero-heading">
+  <h1>Institutional analysis for the<br><span class="heading-accent">sovereign mind.</span></h1>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SEARCH / CONTROLS BAR
+════════════════════════════════════════════ -->
+<div id="controls-bar">
+  <!-- Asset type toggle -->
+  <div class="asset-toggle" id="asset-type-toggle">
+    <button class="asset-pill active" data-type="stock" id="toggle-stock">Stocks</button>
+    <button class="asset-pill" data-type="crypto" id="toggle-crypto">Crypto</button>
+  </div>
+
+  <!-- Symbol search -->
+  <div id="symbol-search-wrap">
+    <svg class="search-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+    </svg>
+    <input type="text" id="symbol-input" placeholder="Search BTC, ETH, AAPL..." autocomplete="off" spellcheck="false">
+    <div id="suggestions-dropdown" class="suggestions-dropdown"></div>
+  </div>
+
+  <!-- Timeframe pills -->
+  <div id="tf-pills">
+    <button class="tf-pill" data-tf="1m">5M</button>
+    <button class="tf-pill" data-tf="1m">1H</button>
+    <button class="tf-pill" data-tf="3m">12H</button>
+    <button class="tf-pill active" data-tf="1y">24H</button>
+    <button class="tf-pill" data-tf="1y">1W</button>
+    <button class="tf-pill" data-tf="2y">1M</button>
+    <button class="tf-pill" data-tf="3y">1Y</button>
+  </div>
+
+  <button id="analyze-btn" class="primary-btn">
+    <span class="btn-text">Analyze</span>
+    <span class="btn-loader" style="display:none"></span>
+  </button>
+</div>
+
+<!-- Quick picks -->
+<div id="quick-picks">
+  <span class="picks-label">Quick Pick:</span>
+  <button class="pick-btn" data-symbol="AAPL" data-type="stock">AAPL</button>
+  <button class="pick-btn" data-symbol="MSFT" data-type="stock">MSFT</button>
+  <button class="pick-btn" data-symbol="NVDA" data-type="stock">NVDA</button>
+  <button class="pick-btn" data-symbol="TSLA" data-type="stock">TSLA</button>
+  <button class="pick-btn" data-symbol="BTC-USD" data-type="crypto">BTC</button>
+  <button class="pick-btn" data-symbol="ETH-USD" data-type="crypto">ETH</button>
+  <button class="pick-btn" data-symbol="SOL-USD" data-type="crypto">SOL</button>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     LOADING STATE
+════════════════════════════════════════════ -->
+<div id="loading-state" style="display:none">
+  <div class="loading-inner">
+    <div class="loading-spinner"></div>
+    <h3 id="loading-text">Analyzing market data...</h3>
+    <p id="loading-sub" class="loading-sub">Initializing pipeline</p>
+    <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     ERROR STATE
+════════════════════════════════════════════ -->
+<div id="error-state" style="display:none">
+  <div class="error-inner">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2">
+      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    <h3>Analysis Failed</h3>
+    <p id="error-message"></p>
+    <button class="primary-btn small" onclick="document.getElementById('error-state').style.display='none'">Dismiss</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     MAIN ANALYSIS RESULTS
+════════════════════════════════════════════ -->
+<section id="analysis-section" style="display:none">
+  <div id="main-grid">
+
+    <!-- ── LEFT COLUMN ── -->
+    <div id="left-col">
+
+      <!-- Consensus Signal Card -->
+      <div class="sa-card" id="consensus-card">
+        <div class="card-label">CONSENSUS SIGNAL <span class="info-icon" data-tip="Overall buy/sell/hold signal combining all AI agents and ML models into a single score from -1 (strong sell) to +1 (strong buy).">ⓘ</span></div>
+        <p class="section-desc">Unified signal from ML models and LLM agents.</p>
+        <div class="donut-wrap">
+          <canvas id="donut-gauge" width="160" height="160"></canvas>
+          <div class="donut-center">
+            <div id="consensus-rec-text" class="donut-rec">—</div>
+            <div id="intensity-badge" class="intensity-badge">—</div>
+          </div>
+        </div>
+        <div class="conf-row">
+          <span class="conf-label">Confidence Level</span>
+          <div class="conf-track"><div class="conf-fill" id="conf-fill"></div></div>
+          <span class="conf-pct" id="conf-pct">—</span>
+        </div>
+        <p class="analysis-quote" id="analysis-quote"><em>Awaiting analysis...</em></p>
+      </div>
+
+      <!-- Market Volatility Card -->
+      <div class="sa-card" id="volatility-card">
+        <div class="card-label">MARKET VOLATILITY <span class="info-icon" data-tip="Annualised volatility measures how much the price fluctuates per year. Above 30% is elevated; above 60% is extreme. Powered by a GARCH(1,1) model.">ⓘ</span></div>
+        <p class="section-desc">Historical price fluctuation — how risky is this asset right now.</p>
+        <div class="vol-main-row">
+          <div id="vol-pct" class="vol-pct">—</div>
+          <div id="risk-badge" class="risk-badge">—</div>
+        </div>
+        <div id="vol-mini-chart" class="vol-mini-chart"></div>
+        <div class="vol-meta" id="vol-meta"></div>
+      </div>
+
+    </div>
+
+    <!-- ── RIGHT COLUMN ── -->
+    <div id="right-col">
+
+      <!-- Ticker Header -->
+      <div id="ticker-header">
+        <div class="ticker-left">
+          <span id="ticker-symbol" class="ticker-symbol">—</span>
+          <span id="price-change-badge" class="price-change-badge neutral">—</span>
+        </div>
+        <div class="ticker-right">
+          <div id="ticker-price" class="ticker-price">—</div>
+          <div id="last-update" class="last-update">—</div>
+        </div>
+      </div>
+      <div class="ticker-sub" id="ticker-sub">—</div>
+
+      <!-- ══ PROJECTED PRICE BANNER (most important element) ══ -->
+      <div id="projection-banner" style="display:none">
+        <div class="proj-section">
+          <div class="proj-sec-label">CURRENT PRICE <span class="info-icon" data-tip="The latest closing price fetched from market data.">ⓘ</span></div>
+          <div id="proj-current" class="proj-current-val">—</div>
+        </div>
+        <div class="proj-separator"></div>
+        <div class="proj-section proj-section-main">
+          <div class="proj-sec-label">
+            AI PROJECTED PRICE
+            <span class="proj-ml-badge">ML + LLM</span>
+            <span class="info-icon" data-tip="Future price predicted by the stacking ensemble (Random Forest + XGBoost + LightGBM + LSTM) combined with LLM agent analysis. This is the model's best estimate.">ⓘ</span>
+          </div>
+          <div id="proj-target" class="proj-target-val">—</div>
+          <div id="proj-horizon" class="proj-horizon-text">—</div>
+        </div>
+        <div class="proj-separator"></div>
+        <div class="proj-section">
+          <div class="proj-sec-label">EXPECTED RETURN <span class="info-icon" data-tip="Predicted percentage gain or loss over the forecast horizon. Confidence is derived from the ensemble R² score.">ⓘ</span></div>
+          <div id="proj-return" class="proj-return-val">—</div>
+          <div id="proj-conf" class="proj-conf-text">—</div>
+        </div>
+        <div class="proj-how-link-wrap">
+          <button class="proj-how-btn" id="proj-how-btn">How was this calculated? →</button>
+        </div>
+      </div>
+
+      <!-- Price Chart -->
+      <div id="chart-wrapper">
+        <canvas id="price-chart"></canvas>
+      </div>
+
+      <!-- Model Performance Metrics Table -->
+      <div class="sa-card" id="metrics-card">
+        <div class="card-label">MODEL PERFORMANCE METRICS <span class="info-icon" data-tip="Each row is an independent ML model. RMSE = average prediction error in price units. R² = how well the model explains price variance (1.0 = perfect). Confidence is derived from R².">ⓘ</span></div>
+        <p class="section-desc">Individual results from each AI model — the ensemble combines them all.</p>
+        <div class="table-wrap">
+          <table id="ml-table">
+            <thead>
+              <tr>
+                <th>MODEL LOGIC</th>
+                <th>RMSE</th>
+                <th>R² SCORE</th>
+                <th>PREDICTION</th>
+                <th>CONFIDENCE</th>
+              </tr>
+            </thead>
+            <tbody id="ml-tbody"></tbody>
+          </table>
+        </div>
+        <div id="ml-meta" class="ml-meta-row"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── DECISION AGENTS ── -->
+  <div id="agents-section">
+    <div class="agents-header">
+      <div>
+        <h2 class="agents-title">Decision Agents</h2>
+        <p class="agents-sub">Four specialized AI layers, each independently analysing a different dimension. Their signals are fused into the final recommendation.</p>
+      </div>
+      <button class="calc-explain-btn" id="calc-explain-btn">How was this calculated? →</button>
+    </div>
+    <div id="agent-grid" class="agent-grid"></div>
+  </div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════
+     TEST WITH THE PAST — Historical Backtest
+════════════════════════════════════════════ -->
+<section id="backtest-section" style="display:none">
+  <div class="sa-card backtest-card">
+    <div class="backtest-header">
+      <div>
+        <h2 class="backtest-title">Test With The Past</h2>
+        <p class="backtest-sub">Choose an asset and a past date. The AI will travel back in time — it will only see data available on that day — and make a prediction. Then we reveal what actually happened.</p>
+        <p class="backtest-sub" style="margin-top:0.35rem;color:var(--text-muted)">This lets you verify the model's accuracy on real past events without any future data leaking in.</p>
+      </div>
+      <div class="backtest-badge">NO LEAKAGE GUARANTEED</div>
+    </div>
+
+    <!-- Backtest quick picks -->
+    <div class="bt-quick-picks">
+      <span class="picks-label">Quick Pick:</span>
+      <button class="bt-pick-btn" data-symbol="AAPL"    data-type="stock">AAPL</button>
+      <button class="bt-pick-btn" data-symbol="MSFT"    data-type="stock">MSFT</button>
+      <button class="bt-pick-btn" data-symbol="NVDA"    data-type="stock">NVDA</button>
+      <button class="bt-pick-btn" data-symbol="TSLA"    data-type="stock">TSLA</button>
+      <button class="bt-pick-btn" data-symbol="BTC-USD" data-type="crypto">BTC</button>
+      <button class="bt-pick-btn" data-symbol="ETH-USD" data-type="crypto">ETH</button>
+      <button class="bt-pick-btn" data-symbol="SOL-USD" data-type="crypto">SOL</button>
+    </div>
+
+    <div class="bt-controls">
+      <div class="bt-field" style="position:relative">
+        <label class="bt-label">Asset Symbol <span class="info-icon" data-tip="Ticker symbol of the asset you want to test. E.g. AAPL for Apple, BTC-USD for Bitcoin.">ⓘ</span></label>
+        <input type="text" id="bt-symbol" class="bt-input" placeholder="Buscar AAPL, BTC-USD…" autocomplete="off" spellcheck="false">
+        <div id="bt-suggestions-dropdown" class="suggestions-dropdown"></div>
+      </div>
+      <div class="bt-field">
+        <label class="bt-label">Historical Date <span class="bt-hint">("Fake Today")</span> <span class="info-icon" data-tip="The AI will pretend this date is today. It will only use data available before this date to make its prediction — no future data allowed.">ⓘ</span></label>
+        <input type="date" id="bt-date" class="bt-input">
+      </div>
+      <div class="bt-field">
+        <label class="bt-label">Asset Type</label>
+        <select id="bt-asset-type" class="bt-input">
+          <option value="stock">Stock</option>
+          <option value="crypto">Crypto</option>
+        </select>
+      </div>
+      <div class="bt-field">
+        <label class="bt-label">Prediction Horizon <span class="info-icon" data-tip="How far into the future should the model predict? The 'actual' data will cover this same period so you can compare.">ⓘ</span></label>
+        <select id="bt-horizon" class="bt-input">
+          <option value="1W">1 Week</option>
+          <option value="2W">2 Weeks</option>
+          <option value="1M" selected>1 Month</option>
+          <option value="3M">3 Months</option>
+          <option value="6M">6 Months</option>
+        </select>
+      </div>
+      <button id="bt-run-btn" class="primary-btn">Run Backtest</button>
+    </div>
+
+    <!-- Backtest Loading -->
+    <div id="bt-loading" style="display:none" class="bt-loading">
+      <div class="loading-spinner small"></div>
+      <span>Running historical simulation...</span>
+    </div>
+
+    <!-- Backtest Error -->
+    <div id="bt-error" style="display:none" class="bt-error"></div>
+
+    <!-- Backtest Results -->
+    <div id="bt-results" style="display:none">
+
+      <div class="bt-summary-row">
+        <!-- Predicted box -->
+        <div class="bt-box predicted-box">
+          <div class="bt-box-label">MODEL PREDICTED AT <span id="bt-res-date"></span></div>
+          <div id="bt-pred-direction" class="bt-direction">—</div>
+          <div id="bt-pred-return" class="bt-return">—</div>
+          <div id="bt-pred-target" class="bt-target-price">—</div>
+          <div id="bt-pred-confidence" class="bt-conf">—</div>
+        </div>
+
+        <!-- Vs separator -->
+        <div class="bt-vs">VS</div>
+
+        <!-- Actual box -->
+        <div class="bt-box actual-box">
+          <div class="bt-box-label">WHAT ACTUALLY HAPPENED</div>
+          <div id="bt-actual-direction" class="bt-direction">—</div>
+          <div id="bt-actual-return" class="bt-return">—</div>
+          <div id="bt-actual-price" class="bt-target-price">—</div>
+          <div id="bt-accuracy-badge" class="bt-acc-badge">—</div>
+        </div>
+      </div>
+
+      <!-- Dual-line chart -->
+      <div id="bt-chart-wrapper">
+        <canvas id="bt-chart"></canvas>
+      </div>
+
+      <!-- Accuracy metrics row -->
+      <div class="bt-metrics-row">
+        <div class="bt-metric">
+          <div class="bt-metric-label">DIRECTION CORRECT <span class="info-icon" data-tip="Did the model correctly predict whether the price would go up or down?">ⓘ</span></div>
+          <div id="bt-dir-correct" class="bt-metric-val">—</div>
+        </div>
+        <div class="bt-metric">
+          <div class="bt-metric-label">RETURN PREDICTION ERROR <span class="info-icon" data-tip="Absolute difference between the predicted % return and the actual % return. Lower is better.">ⓘ</span></div>
+          <div id="bt-return-error" class="bt-metric-val">—</div>
+        </div>
+        <div class="bt-metric">
+          <div class="bt-metric-label">ACCURACY RATING <span class="info-icon" data-tip="EXCELLENT = error below 5% · GOOD = below 15% · POOR = above 15%.">ⓘ</span></div>
+          <div id="bt-rating" class="bt-metric-val">—</div>
+        </div>
+        <div class="bt-metric">
+          <div class="bt-metric-label">MODELS USED</div>
+          <div id="bt-models-used" class="bt-metric-val">—</div>
+        </div>
+      </div>
+
+      <!-- Backtest explain button -->
+      <div style="margin-top:1.25rem;text-align:right">
+        <button class="calc-explain-btn" id="bt-explain-btn">How was this backtest calculated? →</button>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     TRADING BOT — Paper Trading Dashboard
+════════════════════════════════════════════ -->
+<section id="bot-section" style="display:none">
+
+  <!-- Header -->
+  <div class="bot-header">
+    <h2>Autonomous Trading Bot <span class="bot-sim-badge">PAPER TRADING</span></h2>
+    <p>El bot analiza activos con el ensemble ML y ejecuta operaciones simuladas a precios reales de mercado. Los P&amp;L son los que habrías obtenido con dinero real.</p>
+  </div>
+
+  <!-- Tab navigation -->
+  <div class="bot-tabs">
+    <button class="bot-tab active" data-tab="live">Paper Trading Live</button>
+    <button class="bot-tab" data-tab="historical">Backtest Histórico</button>
+    <button class="bot-tab" data-tab="scanner">Scanner de Señales</button>
+  </div>
+
+  <!-- ── TAB: PAPER TRADING LIVE ──────────────────────────────────────── -->
+  <div id="bot-tab-live" class="bot-tab-panel">
+
+  <!-- Portfolio Overview Banner -->
+  <div id="bot-overview">
+    <div class="bot-ov-item">
+      <span class="bot-ov-label">EQUITY TOTAL</span>
+      <span class="bot-ov-val" id="bot-equity">—</span>
+    </div>
+    <div class="bot-ov-sep"></div>
+    <div class="bot-ov-item">
+      <span class="bot-ov-label">EFECTIVO</span>
+      <span class="bot-ov-val" id="bot-cash">—</span>
+    </div>
+    <div class="bot-ov-sep"></div>
+    <div class="bot-ov-item">
+      <span class="bot-ov-label">P&amp;L NO REALIZADO</span>
+      <span class="bot-ov-val" id="bot-unrealized">—</span>
+    </div>
+    <div class="bot-ov-sep"></div>
+    <div class="bot-ov-item">
+      <span class="bot-ov-label">P&amp;L REALIZADO</span>
+      <span class="bot-ov-val" id="bot-realized">—</span>
+    </div>
+    <div class="bot-ov-sep"></div>
+    <div class="bot-ov-item">
+      <span class="bot-ov-label">RETORNO TOTAL</span>
+      <span class="bot-ov-val" id="bot-return">—</span>
+    </div>
+    <div class="bot-ov-sep"></div>
+    <div class="bot-ov-item">
+      <span class="bot-ov-label">POSICIONES ABIERTAS</span>
+      <span class="bot-ov-val" id="bot-open">—</span>
+    </div>
+    <div class="bot-ov-sep"></div>
+    <div class="bot-ov-item">
+      <span class="bot-ov-label">TRADES COMPLETADOS</span>
+      <span class="bot-ov-val" id="bot-trades-count">—</span>
+    </div>
+    <button class="reset-btn" id="bot-reset-btn" title="Cierra todas las posiciones y reinicia a $100,000">Reset Cartera</button>
+  </div>
+
+  <!-- Session Management Bar -->
+  <div class="bot-session-bar">
+    <div class="bot-session-left">
+      <span class="bot-session-lbl">SESIÓN:</span>
+      <select id="bot-session-select" class="bt-input bot-session-select">
+        <option value="">Sesión activa (sin guardar)</option>
+      </select>
+      <button class="secondary-btn bot-session-btn" id="bot-session-load-btn" title="Cargar sesión seleccionada">Cargar</button>
+      <button class="secondary-btn bot-session-btn" id="bot-session-delete-btn" title="Eliminar sesión seleccionada">Eliminar</button>
+    </div>
+    <div class="bot-session-right">
+      <input type="text" id="bot-session-name" class="bt-input bot-session-name-input" placeholder="Nombre de sesión..." maxlength="50">
+      <button class="primary-btn bot-session-btn" id="bot-session-save-btn">Guardar Sesión</button>
+    </div>
+  </div>
+
+  <!-- Main grid: Signal Panel + Positions -->
+  <div class="bot-main-grid">
+
+    <!-- LEFT: Autonomous bot control -->
+    <div class="bot-panel">
+      <div class="bot-panel-title">Control del Bot Autónomo</div>
+
+      <!-- AUTO: one-click scan + execute best signal -->
+      <div class="bot-auto-section">
+        <p class="bot-auto-desc">
+          El bot escanea automáticamente todos los activos del watchlist
+          (stocks + crypto), elige la señal más fuerte según el ensemble ML
+          y ejecuta la operación al tamaño óptimo calculado por Kelly.
+        </p>
+        <button id="bot-auto-btn" class="primary-btn bot-auto-execute-btn">
+          <span class="btn-text">▶ Escanear y Ejecutar Mejor Señal</span>
+          <span class="btn-loader" style="display:none"></span>
+        </button>
+      </div>
+
+      <!-- Result of last auto-execution -->
+      <div id="bot-auto-result" style="display:none" class="bot-auto-result"></div>
+
+      <!-- Loading / Error -->
+      <div id="bot-signal-loading" style="display:none" class="bt-loading">
+        <div class="loading-spinner small"></div>
+        <span>Escaneando watchlist con ML ensemble...</span>
+      </div>
+      <div id="bot-signal-error" style="display:none" class="bt-error"></div>
+
+      <!-- Collapsible: manual analysis for a specific asset -->
+      <div class="bot-manual-toggle" id="bot-manual-toggle">
+        ▸ o analiza un activo específico manualmente
+      </div>
+      <div id="bot-manual-section" style="display:none">
+        <div class="bot-signal-controls">
+          <div class="bt-field">
+            <label class="bt-label">Símbolo</label>
+            <input type="text" id="bot-symbol-input" class="bt-input"
+                   placeholder="AAPL, BTC-USD, TSLA..." autocomplete="off" spellcheck="false">
+          </div>
+          <div class="bt-field">
+            <label class="bt-label">Tipo de activo</label>
+            <select id="bot-asset-type" class="bt-input">
+              <option value="stock">Stock</option>
+              <option value="crypto">Crypto</option>
+            </select>
+          </div>
+          <button id="bot-analyze-btn" class="secondary-btn">
+            <span class="btn-text">Analizar</span>
+            <span class="btn-loader" style="display:none"></span>
+          </button>
+        </div>
+        <!-- Quick picks -->
+        <div class="bot-quick">
+          <button class="bot-pick-btn" data-symbol="AAPL"    data-type="stock">AAPL</button>
+          <button class="bot-pick-btn" data-symbol="NVDA"    data-type="stock">NVDA</button>
+          <button class="bot-pick-btn" data-symbol="TSLA"    data-type="stock">TSLA</button>
+          <button class="bot-pick-btn" data-symbol="MSFT"    data-type="stock">MSFT</button>
+          <button class="bot-pick-btn" data-symbol="BTC-USD" data-type="crypto">BTC</button>
+          <button class="bot-pick-btn" data-symbol="ETH-USD" data-type="crypto">ETH</button>
+        </div>
+        <!-- Signal Result Card (hidden until signal obtained) -->
+        <div id="bot-signal-card" style="display:none" class="bot-signal-card">
+          <div class="bsc-header">
+            <div id="bsc-action" class="bsc-action">—</div>
+            <div id="bsc-symbol-display" class="bsc-symbol-display">—</div>
+            <div id="bsc-timestamp" class="bsc-timestamp"></div>
+          </div>
+          <div class="bsc-metrics">
+            <div class="bsc-metric">
+              <div class="bsc-mlabel">RETORNO PREDICHO</div>
+              <div class="bsc-mval" id="bsc-pred-return">—</div>
+            </div>
+            <div class="bsc-metric">
+              <div class="bsc-mlabel">CONFIANZA</div>
+              <div class="bsc-mval" id="bsc-conf">—</div>
+            </div>
+            <div class="bsc-metric">
+              <div class="bsc-mlabel">FUERZA SEÑAL</div>
+              <div class="bsc-mval" id="bsc-ss">—</div>
+            </div>
+            <div class="bsc-metric">
+              <div class="bsc-mlabel">PRECIO ACTUAL</div>
+              <div class="bsc-mval" id="bsc-price">—</div>
+            </div>
+          </div>
+          <div id="bsc-reason" class="bsc-reason"></div>
+
+          <!-- Multi-agent analysis cards (shown when agents are available) -->
+          <div id="bsc-agents-section" style="display:none" class="bsc-agents-section">
+            <div class="bsc-agents-title">Análisis Multi-Agente (empresa de inversión simulada)</div>
+            <div class="bsc-agents-grid" id="bsc-agents-grid">
+              <!-- populated by JS -->
+            </div>
+          </div>
+
+          <!-- Execute block (only when action != HOLD) -->
+          <div id="bsc-execute-wrap" class="bsc-execute-wrap" style="display:none">
+            <div class="bsc-size-row">
+              <span class="bt-label">Tamaño: <strong id="bsc-size-display">10%</strong> del capital</span>
+              <input type="range" id="bsc-size-slider" min="1" max="30" value="10" class="size-slider">
+              <div class="bsc-size-hint">Kelly sugiere: <span id="bsc-kelly-hint">—</span></div>
+            </div>
+            <button id="bsc-execute-btn" class="execute-btn">Ejecutar Trade</button>
+          </div>
+        </div>
+      </div><!-- end bot-manual-section -->
+    </div>
+
+    <!-- RIGHT: Open Positions -->
+    <div class="bot-panel">
+      <div class="bot-panel-title">
+        Posiciones Abiertas
+        <button class="refresh-btn" id="bot-refresh-btn" title="Actualizar precios en tiempo real">↻ Actualizar</button>
+      </div>
+      <div id="bot-positions-empty" class="bot-empty">
+        Sin posiciones abiertas. Pulsa "Escanear y Ejecutar" para que el bot encuentre y opere la mejor oportunidad.
+      </div>
+      <div id="bot-positions-list"></div>
+    </div>
+  </div>
+
+  <!-- Live Analysis Panel (ML + agent analysis of open positions) -->
+  <div class="sa-card bot-live-analysis-card" id="bot-live-analysis-card" style="display:none">
+    <div class="card-label">
+      ANÁLISIS EN TIEMPO REAL
+      <span class="bot-live-badge">LIVE</span>
+      <button class="refresh-btn" id="bot-live-refresh-btn" style="float:right">↻ Actualizar</button>
+    </div>
+    <p class="section-desc">El bot analiza cada posición abierta con ML ensemble + agentes técnico y de riesgo. Se actualiza automáticamente cada 60 segundos.</p>
+    <div id="bot-live-analysis-grid" class="bot-live-grid">
+      <!-- populated by JS -->
+    </div>
+  </div>
+
+  <!-- Trade History -->
+  <div class="sa-card bot-history-card">
+    <div class="card-label">HISTORIAL DE TRADES</div>
+    <p class="section-desc">Cada operación completada con precio real de entrada y salida.</p>
+    <div id="bot-history-empty" class="bot-empty">Sin trades completados todavía.</div>
+    <div class="table-wrap" id="bot-history-table-wrap" style="display:none">
+      <table id="bot-history-table">
+        <thead>
+          <tr>
+            <th>SÍMBOLO</th><th>ACCIÓN</th><th>ENTRADA</th><th>SALIDA</th>
+            <th>PRECIO ENT.</th><th>PRECIO SAL.</th><th>DÍAS</th>
+            <th>P&amp;L</th><th>RETORNO</th><th>MOTIVO</th>
+          </tr>
+        </thead>
+        <tbody id="bot-history-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  </div><!-- end bot-tab-live -->
+
+  <!-- ── TAB: BACKTEST HISTÓRICO ──────────────────────────────────────── -->
+  <div id="bot-tab-historical" class="bot-tab-panel" style="display:none">
+    <div class="sa-card">
+      <div class="backtest-header">
+        <div>
+          <h2 class="backtest-title">Backtest Histórico del Bot <span class="bot-sim-badge">SIN LEAKAGE</span></h2>
+          <p class="backtest-sub">El bot escaneará <strong>10 activos cada día</strong> y ejecutará la mejor señal — exactamente igual que en Paper Trading Live. Solo verá datos que existían en ese momento.</p>
+          <p class="backtest-sub" style="margin-top:0.35rem;color:var(--accent-teal);font-weight:500">
+            ML entrenado exclusivamente con datos anteriores al inicio del test · 0 leakage garantizado.
+          </p>
+        </div>
+        <div class="backtest-badge">NO LEAKAGE GARANTIZADO</div>
+      </div>
+
+      <!-- Watchlist display -->
+      <div class="hbt-watchlist-row">
+        <span class="picks-label">Activos monitorizados:</span>
+        <span class="hbt-wl-badge">AAPL</span><span class="hbt-wl-badge">MSFT</span>
+        <span class="hbt-wl-badge">NVDA</span><span class="hbt-wl-badge">TSLA</span>
+        <span class="hbt-wl-badge">AMZN</span><span class="hbt-wl-badge">GOOGL</span>
+        <span class="hbt-wl-badge crypto">BTC</span><span class="hbt-wl-badge crypto">ETH</span>
+        <span class="hbt-wl-badge crypto">SOL</span><span class="hbt-wl-badge crypto">BNB</span>
+      </div>
+
+      <!-- Controls (sin selector de símbolo) -->
+      <div class="bt-controls" style="flex-wrap:wrap;gap:1rem">
+        <div class="bt-field">
+          <label class="bt-label">Inicio del test <span class="bt-hint">(entrena con datos anteriores)</span></label>
+          <input type="date" id="hbt-start-date" class="bt-input">
+        </div>
+        <div class="bt-field">
+          <label class="bt-label">Fin del test</label>
+          <input type="date" id="hbt-end-date" class="bt-input">
+        </div>
+        <div class="bt-field">
+          <label class="bt-label">Capital inicial</label>
+          <input type="number" id="hbt-capital" class="bt-input" value="100000" min="1000">
+        </div>
+        <div class="bt-field">
+          <label class="bt-label">Permitir cortos</label>
+          <select id="hbt-allow-short" class="bt-input">
+            <option value="true">Sí</option>
+            <option value="false">No</option>
+          </select>
+        </div>
+        <div class="bt-field">
+          <label class="bt-label">Comisión por operación</label>
+          <select id="hbt-commission" class="bt-input">
+            <option value="0">0% (sin comisión)</option>
+            <option value="0.001" selected>0.1% (broker estándar)</option>
+            <option value="0.005">0.5%</option>
+            <option value="0.01">1% (incluye spread)</option>
+          </select>
+        </div>
+        <button id="hbt-run-btn" class="primary-btn" style="align-self:flex-end">▶ Ejecutar Backtest Autónomo</button>
+      </div>
+
+      <!-- Quick period picks -->
+      <div class="bt-quick-picks" style="margin-top:0.75rem">
+        <span class="picks-label">Período rápido:</span>
+        <button class="bt-pick-btn hbt-period-btn" data-months="3">3 Meses</button>
+        <button class="bt-pick-btn hbt-period-btn" data-months="6">6 Meses</button>
+        <button class="bt-pick-btn hbt-period-btn" data-months="12">1 Año</button>
+        <button class="bt-pick-btn hbt-period-btn" data-months="24">2 Años</button>
+        <button class="bt-pick-btn hbt-period-btn" data-months="36">3 Años</button>
+      </div>
+
+      <!-- Loading -->
+      <div id="hbt-loading" style="display:none" class="bt-loading">
+        <div class="loading-spinner small"></div>
+        <span>Entrenando ML para 10 activos y simulando bot autónomo (puede tardar 3-5 min)...</span>
+      </div>
+
+      <!-- Error -->
+      <div id="hbt-error" style="display:none" class="bt-error"></div>
+
+      <!-- Results -->
+      <div id="hbt-results" style="display:none">
+
+        <!-- Period + leakage proof banner -->
+        <div id="hbt-period-banner" class="hbt-period-banner"></div>
+
+        <!-- Metrics grid -->
+        <div id="hbt-metrics-grid" class="hbt-metrics-grid"></div>
+
+        <!-- Equity curve chart -->
+        <div id="hbt-chart-wrapper" style="margin:1.5rem 0;position:relative;height:300px">
+          <canvas id="hbt-chart"></canvas>
+        </div>
+
+        <!-- Drawdown chart -->
+        <div id="hbt-dd-wrapper" style="position:relative;height:120px;margin-bottom:1.5rem">
+          <canvas id="hbt-dd-chart"></canvas>
+        </div>
+
+        <!-- Signal stats -->
+        <div id="hbt-signal-stats" class="hbt-signal-stats"></div>
+
+        <!-- Per-asset breakdown -->
+        <div class="card-label" style="margin-top:1.5rem;margin-bottom:0.5rem">RENDIMIENTO POR ACTIVO</div>
+        <div id="hbt-per-asset-wrap" style="display:none">
+          <div id="hbt-per-asset-grid" class="hbt-per-asset-grid"></div>
+        </div>
+
+        <!-- Trade table -->
+        <div class="card-label" style="margin-top:1.5rem;margin-bottom:0.5rem">TRADES EJECUTADOS POR EL BOT</div>
+        <div id="hbt-trades-empty" class="bot-empty" style="display:none">El bot no ejecutó ningún trade en este período.</div>
+        <div class="table-wrap" id="hbt-trades-wrap" style="display:none">
+          <table id="hbt-trades-table">
+            <thead>
+              <tr>
+                <th>ACTIVO</th><th>ENTRADA</th><th>SALIDA</th><th>ACCIÓN</th>
+                <th>PRECIO ENT.</th><th>PRECIO SAL.</th><th>DÍAS</th>
+                <th>RET. REAL</th><th>P&amp;L</th><th>MOTIVO</th>
+              </tr>
+            </thead>
+            <tbody id="hbt-trades-tbody"></tbody>
+          </table>
+        </div>
+
+      </div><!-- end hbt-results -->
+    </div>
+  </div><!-- end bot-tab-historical -->
+
+  <!-- ── TAB: SCANNER DE SEÑALES ──────────────────────────────────────── -->
+  <div id="bot-tab-scanner" class="bot-tab-panel" style="display:none">
+    <div class="sa-card">
+      <div class="backtest-header">
+        <div>
+          <h2 class="backtest-title">Scanner Autónomo de Señales</h2>
+          <p class="backtest-sub">El bot escanea 12 activos simultáneamente, rankea las oportunidades por fuerza de señal y muestra cuáles serían las mejores operaciones ahora mismo.</p>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:0.5rem;align-items:flex-end">
+          <div class="asset-toggle" id="scan-type-toggle">
+            <button class="asset-pill active" data-scan-type="both">Todos</button>
+            <button class="asset-pill" data-scan-type="stock">Stocks</button>
+            <button class="asset-pill" data-scan-type="crypto">Crypto</button>
+          </div>
+          <button id="scan-run-btn" class="primary-btn">Escanear Mercado</button>
+        </div>
+      </div>
+
+      <!-- Extra symbols -->
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;flex-wrap:wrap">
+        <label class="bt-label" style="white-space:nowrap">Añadir símbolo:</label>
+        <input type="text" id="scan-extra-symbol" class="bt-input" style="max-width:160px" placeholder="AMZN, SOL-USD...">
+        <select id="scan-extra-type" class="bt-input" style="max-width:120px">
+          <option value="stock">Stock</option>
+          <option value="crypto">Crypto</option>
+        </select>
+        <button id="scan-add-symbol-btn" class="calc-explain-btn">+ Añadir</button>
+      </div>
+
+      <!-- Loading -->
+      <div id="scan-loading" style="display:none" class="bt-loading">
+        <div class="loading-spinner small"></div>
+        <span id="scan-loading-text">Analizando mercado (esto puede tardar varios minutos)...</span>
+      </div>
+
+      <!-- Error -->
+      <div id="scan-error" style="display:none" class="bt-error"></div>
+
+      <!-- Results -->
+      <div id="scan-results" style="display:none">
+        <div id="scan-timestamp" class="scan-timestamp"></div>
+        <div class="table-wrap">
+          <table id="scan-table">
+            <thead>
+              <tr>
+                <th>ACTIVO</th>
+                <th>SEÑAL</th>
+                <th>RETORNO PRED.</th>
+                <th>CONFIANZA</th>
+                <th>FUERZA</th>
+                <th>PRECIO</th>
+                <th>TAMAÑO KELLY</th>
+                <th>EJECUTAR</th>
+              </tr>
+            </thead>
+            <tbody id="scan-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div><!-- end bot-tab-scanner -->
+
+</section>
+
+<!-- Toast notification (shared) -->
+<div id="bot-toast" class="bot-toast"></div>
+
+<!-- ═══════════════════════════════════════════
+     FOOTER
+════════════════════════════════════════════ -->
+<footer id="site-footer">
+  <div class="footer-inner">
+    <div class="footer-logo">Sovereign Analyst</div>
+    <div class="footer-links">
+      <a href="#">Terms of Service</a>
+      <a href="#">Privacy Policy</a>
+      <a href="#">Risk Disclosure</a>
+      <a href="#">Contact</a>
+    </div>
+  </div>
+  <div class="footer-copy">© <span id="footer-year">2026</span> Sovereign Analyst. All analytical rights reserved.</div>
+</footer>
+
+<!-- ═══════════════════════════════════════════
+     CALCULATION EXPLANATION MODAL
+════════════════════════════════════════════ -->
+<div id="calc-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-backdrop" id="modal-backdrop"></div>
+  <div class="modal-panel">
+    <div class="modal-header">
+      <h3 class="modal-title" id="modal-title">How was this calculated?</h3>
+      <button id="modal-close" class="modal-close-btn" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body">
+      <!-- filled dynamically by app.js -->
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
