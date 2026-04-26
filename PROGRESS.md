@@ -163,3 +163,59 @@ curl -X POST localhost:5057/api/paper/autonomous-backtest -d @/tmp/tier12_nollm.
 
 - Test E2E con LLM activo (requiere máquina con ≥ 16 GB RAM libre, o quantización 4-bit del Qwen).
 - Si el upgrade a Qwen 1.5B (Tier 3.4) ocurre antes, validar entonces si el modelo extrae más señal del bloque de noticias real (vs implied solo).
+
+---
+
+## Tier 1.3 — Risk gate determinístico
+
+**Estado:** RECHAZADO ✗ (2026-04-26, gate falla con n=6 ventanas, 3 variantes paramétricas).
+**Decisión final:** código mantenido en `trading_bot/risk_gate.py`, **OFF por default** (`use_risk_gate=False`). Disponible para escenarios futuros (mode=ml más ruidoso, cuentas con leverage).
+**Archivos creados:** `trading_bot/risk_gate.py` (170 LoC), `compare_risk_gate.py` (175 LoC).
+**Archivos modificados:** `api.py` (líneas 1953-1969 import opt-in, 2178-2193 instanciación, 2316-2335 hook on_day_start, 2348-2350 KILL_SWITCH exit, 2418-2425 freeze entradas, 2492-2510 gate_new_position, 2768 stats).
+
+### Resultado A/B (6 ventanas, seed=42, mode=trend MED, sin LLM)
+
+| variante     | avg_ret±CI95          | Sharpe±CI95         | Calmar | worst_DD | DD_disp | Veredicto |
+|--------------|-----------------------|---------------------|--------|----------|---------|-----------|
+| BASELINE_MED | +62.69 % [+11.5,+116.6]| +0.82 [+0.60,+1.11]| +1.13  | -55.43%  | 15.79   | reference |
+| RG_TIGHT     | +18.48 % [+0.3,+34.5] | +0.54 [+0.37,+0.71]| +0.44  | -42.45%  | 11.17   | RECHAZADO |
+| RG_LOOSE     | +36.22 % [+7.3,+67.8] | +0.55 [+0.44,+0.66]| +0.86  | -42.34%  |  9.96   | RECHAZADO |
+| RG_GUARD     | +33.72 % [+6.3,+63.8] | +0.59 [+0.43,+0.75]| +0.80  | -42.02%  |  9.89   | RECHAZADO |
+
+Acceptance gate (cada variante vs BASELINE_MED):
+- TIGHT: Δ_Sharpe -0.29 [-0.43,-0.16] ✗ · Δ_ret -44pp [-85,-10] ✗ · Δ_MaxDD +5.5pp ✓
+- LOOSE: Δ_Sharpe -0.27 [-0.49,-0.11] ✗ · Δ_ret -26pp [-58,+0.2] ✗ · Δ_MaxDD +4.1pp ✓
+- GUARD: Δ_Sharpe -0.24 [-0.38,-0.11] ✗ · Δ_ret -29pp [-63,-0.8] ✗ · Δ_MaxDD +4.2pp ✓
+
+### Diagnóstico
+
+**Por qué falla:** el bot trend mode actual ya tiene 4 capas estructurales de protección:
+- SMA200 filter (long sólo si precio > SMA200)
+- ADX ≥ 22 (sólo opera trending markets)
+- crash_filter (no LONG tras -5% en 5d)
+- vol_scaling per-asset (target_vol/vol_activo)
+
+Sobre esa base, el risk_gate añade redundancia. El kill-switch a 12% DD se dispara durante correcciones intermedias (no crashes) y la pausa de 5 días bloquea el rebote — perdiendo el upside. Ej. W4 (2020-09 → 2022-09): baseline +60%, RG_TIGHT +5.57% (kill_switch=3, sale del bull run del 2021 demasiado pronto). W5 (2020-07 → 2022-07): baseline +192%, RG_TIGHT +52% (kill_switch=21).
+
+Incluso la variante GUARD (sin kill-switch, sólo caps + daily-loss + vol-overlay portfolio) recorta -29pp avg_ret porque el vol-overlay reduce sizing en momentos de subida volátil.
+
+**Por qué el paper AI-Trader sí lo necesita:** GPT-5/Gemini en Alpha Arena hicieron leverage descontrolado (entradas grandes sin filtros) y el risk gate les salvó de -60%. Nuestro bot ya está pre-filtrado: el gate sólo añade fricción.
+
+### Lecciones / decisiones
+
+- **El harness Tier 1.1 funciona perfectamente**: detectó honestamente que un cambio que parecía intuitivamente bueno (control de riesgo determinístico) NO mejora el sistema cuantitativamente. Sin las CIs y el gate, hubiéramos confundido "MaxDD mejora -5pp" con "mejora total" y habríamos perdido +25pp de retorno permanentemente.
+- **Mantener `use_risk_gate=False` por default**: el código está disponible para casos futuros donde se justifique:
+   - **mode=ml** (señales más ruidosas, DD potencialmente mayores)
+   - cuentas con leverage habilitado (`allow_short=True` con apalancamiento)
+   - portfolios concentrados (1-2 símbolos, no 3-5 como ahora)
+- **Reabrir tras Tier 2** (ML mejorado): si la calibración isotónica + dirección/magnitud separada producen un sistema con DD más volátil, podríamos reabrir la decisión.
+- **No borrar el módulo**: la 1ª iteración tenía un bug genuino (kill_switch loop sin reset de peak), arreglarlo fue valioso por sí solo. El módulo es small (170 LoC) y autónomo.
+- **No promover RG_LOOSE como "default mejorado"**: aunque #2 en score_v2 (36.56 vs 50.16 baseline), la diferencia con BASELINE en Sharpe es estadísticamente significativa en su contra.
+
+### Comando reproducible
+
+```
+# desde la raiz del repo
+PORT=5057 .venv/bin/python api.py &
+.venv/bin/python compare_risk_gate.py 6     # ~2 min, sin LLM
+```

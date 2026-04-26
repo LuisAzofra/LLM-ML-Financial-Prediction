@@ -1950,6 +1950,21 @@ def paper_autonomous_backtest():
     use_llm     = bool(body.get('use_llm', False))
     llm_provider = str(body.get('llm_provider', 'local'))
 
+    # ── Risk gate determinístico (Tier 1.3) ────────────────────────────────
+    # Vol-target portfolio + daily-loss limit + kill-switch DD + caps por
+    # símbolo y exposición total. Default off para preservar baseline en
+    # comparativas; activar con use_risk_gate=True. Tras validación A/B
+    # se promoverá a True por defecto.
+    use_risk_gate = bool(body.get('use_risk_gate', False))
+    risk_gate_overrides = {
+        'target_vol_annual':       body.get('rg_target_vol',       0.15),
+        'daily_loss_limit_pct':    body.get('rg_daily_loss',       0.03),
+        'kill_switch_dd_pct':      body.get('rg_kill_dd',          0.12),
+        'kill_switch_pause_days':  body.get('rg_kill_pause_days',  5),
+        'max_position_pct_per_sym':body.get('rg_cap_sym',          0.25),
+        'max_total_exposure_pct':  body.get('rg_cap_total',        1.0),
+    }
+
     if not start_date or not end_date:
         return jsonify({'status': 'error', 'error': 'start_date y end_date son obligatorios'}), 400
 
@@ -2191,6 +2206,20 @@ def paper_autonomous_backtest():
             logger.warning(f"News cache desactivado: {nc_err}")
             build_sentiment_string = None  # type: ignore
 
+        # ── Risk gate determinístico (Tier 1.3) ───────────────────────────
+        risk_gate = None
+        if use_risk_gate:
+            try:
+                from trading_bot.risk_gate import RiskGate, RiskGateConfig
+                risk_gate = RiskGate(RiskGateConfig(**risk_gate_overrides))
+                logger.info(f"Risk gate ON: target_vol={risk_gate.cfg.target_vol_annual} "
+                            f"daily_loss={risk_gate.cfg.daily_loss_limit_pct} "
+                            f"kill_dd={risk_gate.cfg.kill_switch_dd_pct} "
+                            f"cap_sym={risk_gate.cfg.max_position_pct_per_sym}")
+            except Exception as rg_err:
+                logger.warning(f"Risk gate desactivado por error: {rg_err}")
+                risk_gate = None
+
         def _quarter_key(ds: str) -> str:
             # ds = 'YYYY-MM-DD' → 'YYYY-Q{1,2,3,4}'
             try:
@@ -2311,6 +2340,25 @@ def paper_autonomous_backtest():
                     f"vetoed={llm_stats['vetoed']} skip={llm_stats['budget_skipped']} "
                     f"({time.time()-_t_loop_start:.0f}s)"
                 )
+
+            # ── Tier 1.3: hook on_day_start del risk gate ─────────────────────
+            # Computa equity actual para que el gate sepa peak/DD/daily-pnl.
+            # Si dispara kill-switch → cerramos todas las posiciones al close.
+            risk_force_liquidate = False
+            risk_paused = False
+            risk_daily_lock = False
+            if risk_gate is not None:
+                # equity provisional: cash + valor de posiciones a precio de ayer
+                # (mark-to-market real se hace en paso 3 del loop). Para el gate
+                # usamos el último equity_vals registrado.
+                eq_now = equity_vals[-1] if equity_vals else cfg.initial_capital
+                rg_status = risk_gate.on_day_start(ds, eq_now)
+                risk_force_liquidate = bool(rg_status.get('force_liquidate'))
+                risk_paused = bool(rg_status.get('paused'))
+                risk_daily_lock = bool(rg_status.get('daily_lock'))
+                if risk_force_liquidate:
+                    logger.info(f"[risk_gate] KILL-SWITCH @ {ds}  DD={rg_status['current_dd']:.2%}  → liquidate all + pause")
+
             # ── 1. Gestión de posiciones abiertas ─────────────────────────────
             for sym in list(positions.keys()):
                 position = positions[sym]
@@ -2327,10 +2375,13 @@ def paper_autonomous_backtest():
                 # teóricamente con WR > 33.3%. Dejar que los ganadores corran.
 
                 exit_p = None; exit_r = None
+                # ── Tier 1.3: kill-switch del risk_gate cierra TODO al close ──
+                if risk_force_liquidate:
+                    exit_p = day['close']; exit_r = 'KILL_SWITCH'
                 # ── Reverse exit (trend-follow): si la señal cambia de signo
                 #    respecto al tipo de la posición, salir al close. En trend
                 #    mode esto = death cross (LONG) o golden cross (SHORT).
-                if trend_reverse_exit:
+                if exit_p is None and trend_reverse_exit:
                     pred_t = day.get('pred', 0.0)
                     if (position['type'] == 'LONG' and pred_t < 0) or \
                        (position['type'] == 'SHORT' and pred_t > 0):
@@ -2399,7 +2450,11 @@ def paper_autonomous_backtest():
                     del positions[sym]
 
             # ── 2. Buscar nuevas señales si hay slots libres ───────────────────
+            # Tier 1.3: si el risk gate está en pausa post-kill o en lock por
+            # daily-loss, NO abrimos nuevas entradas (sólo gestionamos cierres).
             n_slots = MAX_CONCURRENT - len(positions)
+            if risk_gate is not None and (risk_paused or risk_daily_lock or risk_force_liquidate):
+                n_slots = 0
             if n_slots > 0 and capital > 100:
                 candidates = []
                 for sym, dm in asset_maps.items():
@@ -2482,6 +2537,24 @@ def paper_autonomous_backtest():
                     rel_str  = min(ss / max(threshold, 1e-9), 3.0)
                     vol_sc   = float(np.clip(cfg.target_vol / max(bday['volatility'], 0.05), 0.3, 2.0))
                     size_pct = min(kelly * rel_str * cfg.kelly_scale * vol_sc, cfg.max_position_pct)
+                    # ── Tier 1.3: aplicar caps + vol-target overlay del risk_gate ──
+                    if risk_gate is not None:
+                        eq_now = equity_vals[-1] if equity_vals else cfg.initial_capital
+                        open_val_total = sum(
+                            (positions[s]['shares'] * asset_maps[s][ds]['close'])
+                            if positions[s]['type'] == 'LONG'
+                            else (positions[s]['cost_basis'] - positions[s]['shares'] * asset_maps[s][ds]['close'])
+                            for s in positions
+                            if s in asset_maps and ds in asset_maps[s]
+                        )
+                        allowed, size_pct, _reason = risk_gate.gate_new_position(
+                            ds=ds, equity=eq_now,
+                            open_position_value_total=open_val_total,
+                            sym=sym, candidate_size_pct=size_pct,
+                            equity_vals=equity_vals,
+                        )
+                        if not allowed:
+                            continue
                     pos_val  = capital * size_pct
                     if pos_val < 100:
                         continue
@@ -2642,6 +2715,7 @@ def paper_autonomous_backtest():
                 'target_vol': cfg.target_vol,
                 'use_llm': use_llm,
                 'llm_provider': llm_provider if use_llm else None,
+                'use_risk_gate': use_risk_gate,
             },
             'llm_stats': {
                 'calls':           llm_stats['calls']           if use_llm else 0,
@@ -2649,8 +2723,11 @@ def paper_autonomous_backtest():
                 'errors':          llm_stats['errors']          if use_llm else 0,
                 'vetoed':          llm_stats['vetoed']          if use_llm else 0,
                 'budget_skipped':  llm_stats['budget_skipped']  if use_llm else 0,
+                'sent_real_news':  llm_stats.get('sent_real_news', 0)    if use_llm else 0,
+                'sent_implied_only': llm_stats.get('sent_implied_only', 0) if use_llm else 0,
                 'avg_latency':     round(llm_stats['total_time'] / max(llm_stats['calls'], 1), 2) if use_llm else 0.0,
             },
+            'risk_gate_stats': risk_gate.stats() if risk_gate is not None else {'enabled': False},
             'performance': {
                 'initial_capital':    init_cap,
                 'final_value':        round(final_val, 2),
