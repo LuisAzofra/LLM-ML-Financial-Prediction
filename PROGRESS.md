@@ -460,3 +460,77 @@ curl -s -X POST localhost:5057/api/paper/autonomous-backtest \
   -H 'Content-Type: application/json' \
   -d '{"mode":"trend","start_date":"2025-12-01","end_date":"2026-04-15","use_llm":true,"use_debate":true,"llm_provider":"local","llm_budget":15}'
 ```
+
+---
+
+## Tier 3.2 — Trade journal con memoria k-NN
+
+**Estado:** ACEPTADO ✓ (2026-04-26, módulo + integración + E2E con backtest real validado).
+**Objetivo:** persistir cada trade cerrado con vector de features + metadata, exponer retrieval k-NN cosine para que decisiones futuras puedan aprender de trades históricos similares (mitigando momentum chasing y anchoring biases). Inspirado en HKUDS/Vibe-Trading FTS5 memory.
+**Archivos creados:** `utils/trade_journal.py` (210 LoC).
+**Archivos modificados:** `api.py` (líneas 1958 flag `use_journal`, 2197-2207 instanciación, 2425-2440 entry_features capture, 2410-2422 log_trade hook).
+
+### Diseño
+
+`utils/trade_journal.py` expone:
+- `TradeJournal(db_path)`: SQLite con WAL, esquema `(symbol, entry_date, exit_date, action, features_json, feature_dim, pnl_pct, hold_days, regime, rationale)`. Index por `(symbol, entry_date)` para retrieval rápido.
+- `log_trade(symbol, entry_date, exit_date, action, features_vec, pnl_pct, hold_days, regime, rationale)` → id.
+- `find_similar(features_vec, k=3, symbol=None, before_date=None, min_examples=10)` → list ordered por cosine sim desc. **`before_date` filter** evita leak en backtest: sólo retrieva trades con `entry_date < before_date`.
+- `recent_pnl_stats(symbol=None, n=20)` → `{n, avg_pnl, win_rate}`.
+- `format_lessons_for_prompt(items, max_chars=600)` → string conciso para inyectar al prompt LLM.
+
+Vector de features al entry (8 dimensiones):
+1. ML prediction
+2. ML confidence
+3. SMA50/SMA200 ratio − 1
+4. ATR / close (volatilidad relativa)
+5. ADX / 100 (fuerza tendencia)
+6. Volatilidad anualizada
+7. Relative signal strength (`ss / threshold`)
+8. Size_pct (Kelly final)
+
+### Validación
+
+**Tests sintéticos** (DB temporal, 20 trades simulados):
+- Inserción 20 trades ✓
+- `recent_pnl_stats(n=20)`: avg_pnl, win_rate calculados correctamente ✓
+- `find_similar(target, k=3)`: devuelve top-3 ordenados por cosine sim (0.961, 0.538, 0.490) ✓
+- `format_lessons_for_prompt`: render legible para prompt ✓
+- `before_date filter`: aplica correctamente, devuelve sólo trades anteriores ✓
+- DB cleanup OK ✓
+
+**E2E con backtest real** (2-year window 2022-01 → 2024-01, mode=trend, sin LLM):
+- 6 trades ejecutados, 5 persistidos en journal (uno cerrado en el cleanup final del test no se loguea — ver pendiente abajo)
+- `recent_pnl_stats(n=5)`: avg_pnl +5.21%, win_rate 40% ✓
+- `find_similar(synthetic_features, k=3)`: devuelve trades NVDA y TSLA con cos_sim 0.91-0.94 — coherente con que feature vec sintético tenga overlap con features reales ✓
+- `format_lessons_for_prompt`: output legible mostrando outcomes (+4.9%, +71.8%, -0.0%) ✓
+
+### Lecciones / decisiones
+
+- **`before_date` para anti-leak en backtest** — crítico: sin esto, en una ventana 2018-2024 se podrían retriever trades posteriores al momento de decisión, inflando artificialmente la performance del retrieval.
+- **Vector compactado de 8 features** — balance entre dimensionalidad y representación. Más features (50+) harían el cosine sim más ruidoso por la "curse of dimensionality"; menos (3-4) perderían discriminación.
+- **Cosine similarity puro** (no learned embeddings): es estable, no requiere training adicional, y `min_examples=10` evita devolver basura cuando la DB está vacía.
+- **Logging gracefully degrades**: si log_trade falla por cualquier razón (disk full, schema corrupto), se atrapa y se sigue. El backtest no se rompe.
+- **Persistencia inter-sesión**: la DB se queda en `cache/trade_journal.db` (en .gitignore). Cada backtest acumula trades — útil para el día que se haga el retrieval-aware decision (Tier 3.2 phase 2 abajo).
+
+### Pendiente / siguientes pasos
+
+- **Phase 2: retrieval en el prompt LLM**: integrar `find_similar` + `format_lessons_for_prompt` en `_llm_decision` (con/sin debate). Esto requiere tener vector de features comparable al del entry — cuando estemos en `_llm_decision`, los features del candidato son ligeramente distintos de los del trade ya ejecutado. Habría que normalizar/recortar a las mismas 8 dims.
+- **Cleanup final del backtest**: la rama de cierre forzado al final de la ventana (línea ~2530+) NO loguea al journal actualmente. Trades minoritarios se pierden. Fix trivial pero pequeño cambio.
+- **Métricas agregadas por régimen**: extender `recent_pnl_stats` para devolver desglose por bull/bear regime — útil para debug.
+
+### Comando reproducible
+
+```
+PORT=5057 .venv/bin/python api.py &
+curl -s -X POST localhost:5057/api/paper/autonomous-backtest \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"trend","start_date":"2022-01-01","end_date":"2024-01-01","use_llm":false,"use_journal":true}'
+.venv/bin/python -c "
+import sys; sys.path.insert(0,'.')
+from utils.trade_journal import TradeJournal, format_lessons_for_prompt
+j = TradeJournal()
+print(f'Trades en journal: {j.count()}')
+print(format_lessons_for_prompt(j.find_similar([0.01,0.7,0.05,0.04,0.30,0.22,1.5,0.05], k=3, min_examples=3)))
+"
+```

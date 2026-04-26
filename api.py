@@ -2102,6 +2102,11 @@ def paper_autonomous_backtest():
     # Cache trimestral existente amortiza el coste. Off por default — el
     # gate del harness Tier 1.1 decide su valor neto.
     use_debate  = bool(body.get('use_debate', False))
+    # Tier 3.2: trade journal con memoria persistente. Off por default;
+    # cuando ON, registra cada trade cerrado en SQLite para retrieval k-NN
+    # en sesiones futuras. La integración del retrieval al prompt LLM es
+    # phase 2.
+    use_journal = bool(body.get('use_journal', False))
 
     # ── Risk gate determinístico (Tier 1.3) ────────────────────────────────
     # Vol-target portfolio + daily-loss limit + kill-switch DD + caps por
@@ -2373,6 +2378,18 @@ def paper_autonomous_backtest():
                 logger.warning(f"Risk gate desactivado por error: {rg_err}")
                 risk_gate = None
 
+        # ── Trade journal (Tier 3.2) ──────────────────────────────────────
+        trade_journal = None
+        if use_journal:
+            try:
+                from utils.trade_journal import TradeJournal
+                trade_journal = TradeJournal()
+                logger.info(f"Trade journal ON: db={trade_journal.db_path}  "
+                            f"existing_trades={trade_journal.count()}")
+            except Exception as tj_err:
+                logger.warning(f"Trade journal desactivado por error: {tj_err}")
+                trade_journal = None
+
         def _quarter_key(ds: str) -> str:
             # ds = 'YYYY-MM-DD' → 'YYYY-Q{1,2,3,4}'
             try:
@@ -2620,6 +2637,23 @@ def paper_autonomous_backtest():
                         'exit_reason': exit_r,
                         'hold_days':   max(hold, 0),
                     })
+                    # Tier 3.2: persistir el trade cerrado en el journal
+                    if trade_journal is not None:
+                        try:
+                            entry_feats = position.get('entry_features') or []
+                            trade_journal.log_trade(
+                                symbol=sym,
+                                entry_date=position['entry_date'],
+                                exit_date=ds,
+                                action=position['type'],
+                                features_vec=entry_feats,
+                                pnl_pct=ret_pct,
+                                hold_days=max(hold, 0),
+                                regime=position.get('regime', ''),
+                                rationale=str(exit_r or '')[:500],
+                            )
+                        except Exception as tj_e:
+                            logger.debug(f"trade_journal.log_trade failed: {tj_e}")
                     del positions[sym]
 
             # ── 2. Buscar nuevas señales si hay slots libres ───────────────────
@@ -2741,6 +2775,19 @@ def paper_autonomous_backtest():
                         'symbol': sym, 'type': direc, 'entry_date': ds,
                         'entry_price': entry_adj, 'shares': shares,
                         'cost_basis': pos_val, 'stop_loss': sl, 'take_profit': tp,
+                        # Tier 3.2: features compactos al entry para retrieval k-NN futuro
+                        'entry_features': [
+                            float(bday.get('pred', 0.0)),
+                            float(bday.get('conf', 0.5)),
+                            float((bday.get('sma50', 0.0) or 0.0) / max(bday.get('sma200', 1.0) or 1.0, 1e-6) - 1.0),
+                            float((bday.get('atr', 0.0) or 0.0) / max(bday.get('close', 1.0) or 1.0, 1e-6)),
+                            float((bday.get('adx', 0.0) or 0.0) / 100.0),
+                            float(bday.get('volatility', 0.0) or 0.0),
+                            float(rel_str),
+                            float(size_pct),
+                        ],
+                        'regime': ('bull' if (bday.get('sma50', 0) > bday.get('sma200', 0))
+                                   else 'bear'),
                     }
 
             # ── 3. Mark-to-market ──────────────────────────────────────────────
