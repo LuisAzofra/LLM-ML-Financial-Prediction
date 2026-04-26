@@ -941,12 +941,16 @@ def _run_agents(df, symbol, ml_pred, use_llm, llm_provider) -> dict:
 # ──────────────────────────────────────────────
 # Hybrid score
 # ──────────────────────────────────────────────
-def _compute_hybrid_score(ml_result: dict, agent_result: dict) -> dict:
+def _compute_hybrid_score(ml_result: dict, agent_result: dict,
+                          ml_weight: float = 0.75) -> dict:
     """Compute the hybrid ML + LLM score.
 
     Direction-consistency rule: when ML and LLM disagree on direction,
     the recommendation is capped at MANTENER.  This prevents the UI from
     showing BUY while the projected price is going down (or vice-versa).
+
+    Tier 3.3: ml_weight parametrizado para A/B sweep ML/LLM.
+    Default 0.75 (mantenido). Valores razonables: 0.6-0.85.
     """
     ml_pred = ml_result.get('ensemble_prediction', 0)
     ml_conf = ml_result.get('ensemble_confidence', 0.5)
@@ -966,10 +970,11 @@ def _compute_hybrid_score(ml_result: dict, agent_result: dict) -> dict:
     llm_conf = agent_result.get('final_confidence', 0.5)
 
     # ML carries much more weight — it has a quantitative edge over LLM narrative.
-    # Antes: 60/40.  Ahora: 75/25 porque el LLM local (qwen2.5) aporta sesgo ruidoso
-    # y bloqueaba señales ML buenas a través del veto de dirección.
-    ml_weight  = 0.75
-    llm_weight = 0.25
+    # Antes: 60/40.  Ahora: 75/25 (default) porque el LLM local (qwen2.5) aporta
+    # sesgo ruidoso y bloqueaba señales ML buenas a través del veto de dirección.
+    # Tier 3.3: ml_weight ahora parametrizable (default 0.75) para sweep A/B.
+    ml_weight  = float(max(0.0, min(1.0, ml_weight)))
+    llm_weight = 1.0 - ml_weight
 
     hybrid_score = float(ml_signal * ml_weight + llm_signal * llm_weight)
 

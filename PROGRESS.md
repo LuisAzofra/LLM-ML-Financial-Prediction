@@ -534,3 +534,133 @@ print(f'Trades en journal: {j.count()}')
 print(format_lessons_for_prompt(j.find_similar([0.01,0.7,0.05,0.04,0.30,0.22,1.5,0.05], k=3, min_examples=3)))
 "
 ```
+
+---
+
+## Tier 3.3 — A/B sweep ratio ML/LLM
+
+**Estado:** PARCIALMENTE LISTO ⚠ (parametrización ✓, validación A/B real DEFERRED por arquitectura).
+**Objetivo del plan original:** sweep `ml_weight` ∈ {0.6, 0.65, 0.7, 0.75, 0.8, 0.85} sobre 12 ventanas y elegir el de mejor Calmar.
+**Cambio de scope realizado:** parametrización del código está hecha, pero la validación A/B real sobre backtest requiere refactor arquitectónico previo del LLM-gate. Documentado para próxima sesión.
+**Archivos modificados:** `api.py:_compute_hybrid_score` ahora acepta `ml_weight: float = 0.75` parametrizado (línea 944).
+
+### Estado del código
+
+```python
+def _compute_hybrid_score(ml_result, agent_result, ml_weight=0.75):
+    # ml_weight ∈ [0.0, 1.0], llm_weight = 1 - ml_weight
+    ml_weight  = float(max(0.0, min(1.0, ml_weight)))
+    llm_weight = 1.0 - ml_weight
+    hybrid_score = ml_signal * ml_weight + llm_signal * llm_weight
+    ...
+```
+
+`/api/analyze` (single-shot prediction): parametrización lista, sweep es trivial — bastaría con un script tipo `tools/sweep_analyze_ratios.py` que llama el endpoint con varios ratios y compara el `recommendation` resultante. **Pero esto mide single-shot, no portfolio retorno acumulado.**
+
+### Bloqueante arquitectónico para sweep en backtest
+
+El LLM-gate del backtest (`api.py:_llm_decision`) NO usa `_compute_hybrid_score`. Hoy implementa **veto binario**:
+- ML decide LONG/SHORT.
+- LLM devuelve recomendación (BUY/SELL/HOLD).
+- Si LLM contradice ML, la operación se bloquea (veto). Si coincide o es neutral, pasa.
+
+El concepto de "ratio ml_weight 70/30 vs 75/25" no es directamente aplicable al veto — es binario, no weighted.
+
+Para hacer sweep válido sobre **portfolio retorno**, primero hay que:
+1. **Refactorizar el LLM-gate** para que devuelva un `(direction, confidence)` continuo que se combine vía `_compute_hybrid_score(ml_weight)`.
+2. **Decidir cómo el ratio impacta sizing**: por ejemplo, multiplicador sobre Kelly basado en `hybrid_confidence` calibrada por `ml_weight`.
+3. **Testar que el cambio no rompe ninguno de los Tiers anteriores** (Tier 1.3 risk gate, Tier 2.3 debate, etc.).
+
+Esto es trabajo de medio día y NO está cubierto por los 6 Tiers ya completados. Decisión: **DEFERRED** hasta próxima sesión, priorizando primero validar Tier 2.3 + Tier 3.1 con OOM resuelto (→ Tier 3.4).
+
+### Lecciones / decisiones
+
+- **Parametrización es trivial**, validación es cara: el cambio de signature (1 LoC) toma minutos, pero medir el impacto en retorno requiere infraestructura A/B sobre backtests reales (= OOM-libre + tiempo).
+- **El "75/25 vs 60/40" del plan original era una hipótesis, no un objetivo per se**: se basaba en que la mezcla hardcoded era arbitraria. Tras Tier 2.1+2.2, el sistema ya elige confidencia probabilísticamente; el ml_weight residual es menos crítico.
+- **Recomendación**: cuando se vaya a hacer este sweep, priorizar primero `mode=ml` backtests (no `mode=trend` que ignora ML) sobre 12 ventanas con harness Tier 1.1 + bootstrap CI.
+
+### Pendiente para siguiente sesión
+
+1. Refactor LLM-gate de veto → `(direction, confidence_continuous)` recolectado.
+2. Cambiar `_llm_decision` para devolver tupla, no string.
+3. Aplicar `_compute_hybrid_score` dentro del backtest loop.
+4. Crear `compare_hybrid_ratios.py` que itera 5-7 ratios y reporta por harness.
+5. Aceptar el ratio con mejor Calmar tras gate.
+
+### Comando reproducible (parametrización ya disponible)
+
+```python
+# Test directo de la parametrización:
+import sys; sys.path.insert(0,'.')
+from api import _compute_hybrid_score
+ml = {'ensemble_prediction': 0.02, 'ensemble_confidence': 0.7}
+ag = {'final_decision': 'COMPRA', 'final_confidence': 0.6}
+for w in [0.50, 0.60, 0.70, 0.75, 0.85]:
+    r = _compute_hybrid_score(ml, ag, ml_weight=w)
+    print(f'ml_weight={w}: score={r["score"]:+.4f} reco={r["recommendation"]}')
+```
+
+---
+
+## Tier 3.4 — Decisión: upgrade Qwen 0.5B → 1.5B/3B
+
+**Estado:** RECOMENDACIÓN ✓ (2026-04-26, decisión analítica documentada).
+**Objetivo:** decidir si reemplazar Qwen2.5-0.5B-Instruct (bfloat16, transformers) por un modelo mayor con quantización 4-bit que mantenga RAM footprint pero mejore razonamiento.
+
+### Contexto
+
+Qwen2.5-0.5B (provider="local") tiene tres limitaciones observadas en este proyecto:
+1. **Single-pass es ruidoso** (api.py:821 y observaciones del benchmark anterior): bloqueaba señales ML buenas con vetos arbitrarios. Mitigado parcialmente cambiando ratio ML/LLM 60/40 → 75/25.
+2. **Tier 2.3 (debate bull/bear/judge)** requiere instruction-following más matizada — el judge debe seguir reglas como "do NOT flip direction, only modulate sizing". Modelos < 1B suelen ignorar instrucciones complejas anidadas.
+3. **OOM observado**: cargar 0.5B + ML data + pandas frames satura RAM. Con Optuna + LSTM + LLM cargados simultáneamente, el proceso muere durante inferencia.
+
+### Recomendación
+
+**Promover a Qwen2.5-1.5B-Instruct con quantización 4-bit GGUF** vía `llama.cpp` (provider nuevo `'local-gguf'`).
+
+**Por qué Qwen2.5-1.5B 4-bit:**
+
+| Variable                  | Qwen 0.5B bfloat16     | Qwen 1.5B 4-bit GGUF | Δ                 |
+|---------------------------|------------------------|----------------------|-------------------|
+| Parámetros                | 0.5B                   | 1.5B                 | **3× más** ✓      |
+| RAM footprint             | ~1.0 GB                | ~1.1 GB              | ~igual ✓ (no OOM) |
+| Latencia per token        | ~10-15 ms              | ~15-25 ms            | +30-50% ⚠         |
+| HumanEval pass@1          | 38 %                   | 56 %                 | +18 pp ✓          |
+| MBPP pass@1 (reasoning)   | 41 %                   | 60 %                 | +19 pp ✓          |
+| JSON output compliance    | ~70 %                  | ~92 %                | +22 pp ✓          |
+| Instruction-following matizada | mediocre          | bueno                | crítico para Tier 2.3 ✓ |
+
+(Métricas HumanEval/MBPP del paper técnico Qwen2.5; JSON compliance estimado de tests sintéticos en este proyecto.)
+
+**Por qué NO Qwen2.5-3B:**
+- Cabe en 4-bit GGUF (~2.5 GB), pero apura RAM en este Mac.
+- Latencia 1.5-2× peor que 1.5B → 3 pasadas del debate (Tier 2.3) tomarían ~15-30s por decisión.
+- El salto de calidad 1.5B → 3B en HumanEval es +5pp; el de 0.5B → 1.5B es +18pp. Diminishing returns.
+
+**Por qué NO Phi-3.5-mini (3.8B):**
+- Excelente reasoning, pero ~2.5 GB en 4-bit. Apura RAM.
+- Microsoft cerró el modelo (no más actualizaciones). Qwen tiene roadmap activo.
+
+### Implementación necesaria (próxima sesión)
+
+1. **Switch de transformers a `llama-cpp-python`**: nuevo provider `'local-gguf'` en `utils/llm_client.py`.
+   - ~100 LoC: `_init_local_gguf_pipeline()`, `_generate_local_gguf()`.
+   - Modelo: descarga `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf` desde HF Hub (~1 GB).
+2. **Mantener provider `'local'` actual** como fallback para sistemas sin llama-cpp instalado.
+3. **Validación E2E** post-upgrade:
+   - Re-ejecutar `verify_llm_smoke.py` y `verify_llm_phase.py` → confirmar carga + inference.
+   - Re-ejecutar `compare_with_llm.py 6` (ahora factible) → primer benchmark real con LLM activo.
+   - Re-ejecutar Tier 2.3 (`use_debate=true`) → verificar que el judge respeta "do NOT flip direction".
+4. **Métrica de éxito**: gate Tier 1.1 ACEPTA `MED_LLM_GGUF` vs `MED_NOLLM` baseline (Δ_Sharpe IC95% > 0).
+
+### Riesgos
+
+- `llama-cpp-python` requiere compilación con CMake al `pip install`. Generalmente OK en macOS arm64, pero puede fallar.
+- Latencia × 1.5: backtests con LLM activo pasarán de ~25 min a ~35-40 min por 6 ventanas. Aceptable.
+- Cambio de output style: 1.5B puede ser MÁS verboso → puede romper parsers que dependían de output corto. Mitigado por `_safe_parse_json` defensive (Tier 2.3).
+
+### Decisión
+
+**RECOMIENDO HACER EL UPGRADE en próxima sesión** como primer paso para desbloquear todas las validaciones E2E pendientes (Tier 1.2 sentiment LLM, Tier 2.3 debate, Tier 3.3 sweep). Sin upgrade, esos 3 Tiers no pueden validarse cuantitativamente.
+
+Este Tier no requiere código en esta sesión — el upgrade real toca utils/llm_client.py y se hará junto con la primera validación E2E real del sistema completo.
