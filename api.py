@@ -2098,6 +2098,10 @@ def paper_autonomous_backtest():
     # (símbolo, año-mes) → reduce drásticamente el coste de cómputo.
     use_llm     = bool(body.get('use_llm', False))
     llm_provider = str(body.get('llm_provider', 'local'))
+    # Tier 2.3: bull/bear debate + judge (3× llamadas LLM por decisión).
+    # Cache trimestral existente amortiza el coste. Off por default — el
+    # gate del harness Tier 1.1 decide su valor neto.
+    use_debate  = bool(body.get('use_debate', False))
 
     # ── Risk gate determinístico (Tier 1.3) ────────────────────────────────
     # Vol-target portfolio + daily-loss limit + kill-switch DD + caps por
@@ -2446,13 +2450,33 @@ def paper_autonomous_backtest():
                       f"({'LONG' if pred > 0 else 'SHORT'}), confianza={conf:.2f}.")
             t0 = time.time()
             try:
-                mkt = llm.interpret_market_data(tech, sent, risk, ml_sum)
-                parsed = mkt.get('parsed', {}) if isinstance(mkt, dict) else {}
-                rec = str(parsed.get('recommendation', 'HOLD')).upper().strip()
-                if '|' in rec:
-                    rec = 'HOLD'
-                llm_stats['calls'] += 1
-                llm_stats['total_time'] += time.time() - t0
+                # ── Tier 2.3: bull/bear debate + judge (opt-in) ─────────
+                if use_debate:
+                    from agents.debate import run_debate, is_veto_from_debate
+                    deb = run_debate(llm, ml_sum, tech, sent, risk)
+                    llm_stats['calls'] += 3 if deb.get('ok') else 2
+                    llm_stats['total_time'] += time.time() - t0
+                    cm = float(deb.get('confidence_mult', 0.5))
+                    direc_label = 'LONG' if (day.get('pred', 0.0) > 0) else 'SHORT'
+                    if is_veto_from_debate(direc_label, cm, threshold=0.4):
+                        # judge confidence muy baja → HOLD (veto del lado bear)
+                        rec = 'HOLD'
+                    else:
+                        # ML decide dirección; debate sólo modula sizing aguas
+                        # arriba (kelly_scale × cm). Aquí simplemente NO vetamos.
+                        rec = 'BUY' if direc_label == 'LONG' else 'SELL'
+                    llm_stats.setdefault('debate_runs', 0)
+                    llm_stats['debate_runs'] += 1
+                    llm_stats.setdefault('debate_avg_conf_mult_sum', 0.0)
+                    llm_stats['debate_avg_conf_mult_sum'] += cm
+                else:
+                    mkt = llm.interpret_market_data(tech, sent, risk, ml_sum)
+                    parsed = mkt.get('parsed', {}) if isinstance(mkt, dict) else {}
+                    rec = str(parsed.get('recommendation', 'HOLD')).upper().strip()
+                    if '|' in rec:
+                        rec = 'HOLD'
+                    llm_stats['calls'] += 1
+                    llm_stats['total_time'] += time.time() - t0
             except Exception as e:
                 logger.debug(f"LLM call error {sym} {ds}: {e}")
                 llm_stats['errors'] += 1

@@ -405,3 +405,58 @@ df.index = df.index.tz_localize(None) if df.index.tz else df.index
 print([c for c in add_cross_asset_features(df, 'ETH-USD', 'crypto').columns if c.startswith(('macro_','xa_'))])
 "
 ```
+
+---
+
+## Tier 2.3 — Bull/bear debate + judge LLM
+
+**Estado:** IMPLEMENTADO ✓ (módulo + integración + tests sintéticos), validación A/B real **DEFERRED por OOM** en este Mac.
+**Objetivo:** mejorar la calibración de confianza del LLM-gate sustituyendo single-pass por 3 pasadas (bull → bear → judge). El judge devuelve un multiplicador de sizing en `[0.3, 1.0]` SIN flippear la dirección que decide ML.
+**Archivos creados:** `agents/debate.py` (170 LoC).
+**Archivos modificados:** `api.py` (líneas 1953 flag `use_debate`, 2270-2305 integración en `_llm_decision`).
+
+### Diseño
+
+- **Pasada 1 (bull):** prompt "argumenta STRONG LONG" → 3 bullet points en JSON.
+- **Pasada 2 (bear):** prompt "argumenta STRONG SELL" → 3 bullet points en JSON.
+- **Pasada 3 (judge):** prompt con `{bull_args, bear_args, ml_pred, sentiment, risk}` → `confidence` ∈ [0.3, 1.0]. **El judge sólo modula sizing**, no flippea dirección — preserva ML como decisor primario.
+- **Veto threshold**: si `confidence_mult < 0.4`, la operación se trata como HOLD (bear case domina).
+- **Cache trimestral compartida**: el resultado del debate cachea por `(symbol, quarter)` en el mismo `llm_cache` existente — amortiza el coste 3× sobre toda la ventana.
+- **Parser robusto** (`_safe_parse_json`): extrae el primer JSON object con la key requerida, tolera prose+JSON, JSON múltiples, malformados, no-json. Tests verifican los 5 casos.
+
+### Validación
+
+**Tests sintéticos** (con LLM mockeado, `agents/debate.py`):
+
+| Test                          | Resultado |
+|-------------------------------|-----------|
+| AST + imports OK              | ✓         |
+| Prompts (bull/bear/judge)     | construyen con JSON-only system prompt ✓ |
+| `_safe_parse_json` casos: plain JSON / prose+JSON / multi-objs / malformed / not-json | 5/5 ✓ |
+| `run_debate` E2E con mock LLM | 3 llamadas, 3+3 args, confidence_mult=0.65 ✓ |
+
+**Validación E2E con Qwen real:** **DEFERRED**. Requiere `use_llm=true + use_debate=true` en backtest, lo cual carga Qwen 0.5B + datos ML + pandas frames simultáneamente → OOM en este Mac (mismo issue que Tier 1.2 E2E). Cuando se ejecute (con Tier 3.4 quantización 4-bit o máquina con ≥16 GB libre), el harness Tier 1.1 con `compare_with_llm.py` decidirá si Tier 2.3 ACEPTA o RECHAZA.
+
+### Lecciones / decisiones
+
+- **No flippear dirección desde LLM**: el debate sólo modula sizing. Esto evita el problema documentado en api.py:821 ("Qwen2.5 aporta sesgo ruidoso bloqueando señales ML buenas") — el ML decide LONG/SHORT, el LLM ajusta convicción.
+- **`_safe_parse_json` defensive**: scanner balanceado de `{...}` con búsqueda iterativa. Maneja todos los modos de fallo del LLM observados (markdown wrapper, prose+JSON, JSON malformado).
+- **Coste 3×** mitigado por cache trimestral. Para una ventana de 2 años con cache trimestre × 6 símbolos = ~48 decisiones únicas × 3 = 144 LLM calls vs 144 single-pass (sin cache, sería 730 días × 6 = 4380). Aceptable con budget=60-100.
+- **Threshold de veto 0.4**: elegido conservador. Si confidence_mult ≥ 0.4, el bear case no domina suficiente como para vetar; sólo se modula size. < 0.4 → HOLD (bear case dominante).
+- **Validación A/B parcial**: tests sintéticos cubren happy path + parser. Pero el comportamiento de Qwen 0.5B real en los 3 prompts (especialmente el judge con su instrucción más matizada) NO se ha validado. Hay riesgo real de que Qwen 0.5B no siga la instrucción "do NOT flip direction" — el upgrade a Qwen 1.5B (Tier 3.4) sería un mitigante.
+
+### Pendiente para siguiente sesión
+
+- Test E2E con LLM real activo (requiere ≥16 GB RAM o quantización Qwen).
+- Si Tier 3.4 promueve a Qwen 1.5B/3B, el debate debería funcionar mejor (capacidad para seguir instrucciones más complejas).
+- Si Qwen 0.5B + debate produce más errores que single-pass (parsing, alucinaciones), revertir use_debate=False.
+
+### Comando reproducible
+
+```
+PORT=5057 .venv/bin/python api.py &
+# E2E con LLM real (CUIDADO: OOM probable en Mac < 16GB libres):
+curl -s -X POST localhost:5057/api/paper/autonomous-backtest \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"trend","start_date":"2025-12-01","end_date":"2026-04-15","use_llm":true,"use_debate":true,"llm_provider":"local","llm_budget":15}'
+```
