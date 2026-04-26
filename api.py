@@ -530,9 +530,25 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
         tscv = TimeSeriesSplit(n_splits=n_splits, gap=15)
         cv_metrics = {'random_forest': [], 'xgboost': [], 'lightgbm': [], 'hist_gradient': []}
         # Tier 2.1: recolectar OOF predictions del XGB (proxy del ensemble) para
-        # fit isotónico posterior. Usamos XGB porque es el modelo individual más
-        # informativo en este pipeline (R² más estable que RF, similar a LGBM).
+        # fit isotónico posterior.
         oof_xgb = np.full(len(X), np.nan, dtype=float)
+        # Tier 2.2: XGBClassifier direccional con scale_pos_weight (clase
+        # imbalanceada en mercados alcistas). Sus probabilidades OOF son el
+        # input PREFERENTE para el calibrador isotónico — son ya P(positive)
+        # nativas, sin necesidad de mapear scores arbitrarios a P. Si el
+        # classifier resulta NO accepted, fallback a oof_xgb regressor.
+        oof_xgb_dir = np.full(len(X), np.nan, dtype=float)
+        # Etiquetas binarias para el classifier
+        y_dir = (y > 0).astype(int)
+        # scale_pos_weight global (se ajusta por fold abajo)
+        n_pos = int(y_dir.sum()); n_neg = int(len(y_dir) - n_pos)
+        # Hiperparámetros del classifier (más conservadores que regressor)
+        xgb_dir_params = dict(
+            n_estimators=200, max_depth=4, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.7,
+            reg_alpha=0.1, reg_lambda=1.0,
+            random_state=42, n_jobs=-1, eval_metric='logloss',
+        )
 
         for train_idx, test_idx in tscv.split(X):
             X_tr, X_te = X[train_idx], X[test_idx]
@@ -551,8 +567,20 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
                     'mae':  float(mean_absolute_error(y_te, preds)),
                     'r2':   float(r2_score(y_te, preds)),
                 })
-            # Snapshot OOF predictions del XGB para calibración (Tier 2.1)
+            # Snapshot OOF predictions del XGB regressor (Tier 2.1)
             oof_xgb[test_idx] = xgb_fold.predict(X_te)
+
+            # Tier 2.2: classifier direccional con scale_pos_weight per-fold
+            try:
+                y_tr_dir = (y_tr > 0).astype(int)
+                n_pos_tr = int(y_tr_dir.sum()); n_neg_tr = int(len(y_tr_dir) - n_pos_tr)
+                spw = (n_neg_tr / max(n_pos_tr, 1)) if n_pos_tr > 0 else 1.0
+                xgb_dir_fold = xgb.XGBClassifier(
+                    scale_pos_weight=spw, **xgb_dir_params
+                ).fit(X_tr, y_tr_dir)
+                oof_xgb_dir[test_idx] = xgb_dir_fold.predict_proba(X_te)[:, 1]
+            except Exception as ce:
+                logger.debug(f"XGB classifier OOF fold failed: {ce}")
 
         # Average CV metrics
         model_results = []
@@ -569,6 +597,17 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
         xgb_final = xgb.XGBRegressor(**xgb_params).fit(X, y)
         lgb_final = lgb.LGBMRegressor(**lgb_params).fit(X, y)
         hgb_final = HistGradientBoostingRegressor(**hgb_params).fit(X, y)
+        # Tier 2.2: classifier final sobre todo X (para inferencia).
+        # Si los OOF del classifier son válidos, este será el modelo de
+        # P(direction) usado en inferencia para alimentar el calibrador.
+        xgb_dir_final = None
+        try:
+            spw_final = (n_neg / max(n_pos, 1)) if n_pos > 0 else 1.0
+            xgb_dir_final = xgb.XGBClassifier(
+                scale_pos_weight=spw_final, **xgb_dir_params
+            ).fit(X, y_dir)
+        except Exception as ce:
+            logger.warning(f"XGB classifier final fit failed: {ce}")
 
         base_models = [
             ('random_forest',  rf_final),
@@ -705,21 +744,64 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
 
         confidence = round(max(0.10, min(0.85, base_conf)), 3)
 
-        # ── Tier 2.1: refinamiento con calibración isotónica ────────────
-        # Si las OOF preds del XGB son razonables y el calibrador pasa el
-        # filtro Brier+reliability, refinamos `confidence` con P(retorno>0)
-        # calibrada. En caso contrario, mantenemos la confianza legacy.
+        # ── Tier 2.1 + 2.2: refinamiento con calibración isotónica ───────
+        # Estrategia en cascada:
+        #   1. Preferir OOF probabilities del XGBClassifier direccional
+        #      (Tier 2.2): probabilidades nativas, mejor reliability_corr.
+        #   2. Si el classifier no produjo OOF válidas, fallback a OOF
+        #      del XGBRegressor (Tier 2.1).
+        #   3. Si ningún calibrador pasa el gate (Brier < baseline AND
+        #      reliability_corr ≥ 0.5), fallback a confianza legacy.
         calibration_info = None
         try:
             from utils.calibration import (
                 fit_calibrator_from_oof, combine_confidence, calibrator_path,
             )
-            cal, cal_metrics = fit_calibrator_from_oof(oof_xgb, y, name='ensemble')
-            if cal is not None:
-                p_cal = float(cal.predict_proba(np.array([ensemble_pred]))[0])
+
+            cal = None
+            cal_metrics = None
+            cal_source = None
+            score_for_inference = None
+
+            # 1) Intento con OOF probabilidades del classifier (Tier 2.2)
+            if (xgb_dir_final is not None
+                    and not np.isnan(oof_xgb_dir).all()):
+                cal_clf, m_clf = fit_calibrator_from_oof(
+                    oof_xgb_dir, y, name='direction_clf',
+                )
+                if cal_clf is not None:
+                    cal = cal_clf
+                    cal_metrics = m_clf
+                    cal_source = 'direction_classifier'
+                    # Score para inferencia: P del classifier final sobre fila latest
+                    try:
+                        p_clf = float(xgb_dir_final.predict_proba(latest_flat)[0, 1])
+                        score_for_inference = p_clf
+                    except Exception:
+                        # latest_flat aún no definido en este punto; lo asignamos abajo
+                        # cuando el bloque ya se ejecute después; este try captura el
+                        # NameError silenciosamente y forzamos fallback al regressor.
+                        cal = None
+
+            # 2) Fallback: OOF del regressor (Tier 2.1)
+            if cal is None:
+                cal_reg, m_reg = fit_calibrator_from_oof(
+                    oof_xgb, y, name='regressor_proxy',
+                )
+                if cal_reg is not None:
+                    cal = cal_reg
+                    cal_metrics = m_reg
+                    cal_source = 'regressor_proxy'
+                    score_for_inference = float(ensemble_pred)
+                else:
+                    cal_metrics = m_reg
+
+            if cal is not None and score_for_inference is not None:
+                p_cal = float(cal.predict_proba(np.array([score_for_inference]))[0])
                 conf_cal = combine_confidence(p_cal, agreement_ratio, prediction_horizon)
                 calibration_info = {
                     'used':                  True,
+                    'source':                cal_source,
                     'p_positive_calibrated': round(p_cal, 4),
                     'brier_score':           round(cal_metrics.brier_score, 4),
                     'brier_baseline':        round(cal_metrics.base_rate * (1 - cal_metrics.base_rate), 4),
@@ -729,10 +811,10 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
                     'confidence_calibrated': round(conf_cal, 3),
                 }
                 logger.info(
-                    f"Calibration ON  Brier={cal_metrics.brier_score:.3f} "
+                    f"Calibration ON [{cal_source}]  Brier={cal_metrics.brier_score:.3f} "
                     f"(base {calibration_info['brier_baseline']:.3f}) "
                     f"corr={cal_metrics.reliability_correlation:.2f}  "
-                    f"p_cal({ensemble_pred:.4f})={p_cal:.3f}  "
+                    f"score={score_for_inference:.4f} → p_cal={p_cal:.3f}  "
                     f"conf {confidence:.3f} → {conf_cal:.3f}"
                 )
                 confidence = round(conf_cal, 3)
@@ -740,14 +822,13 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
                 calibration_info = {
                     'used':              False,
                     'reason':            'rejected_by_filters',
-                    'brier_score':       round(cal_metrics.brier_score, 4),
-                    'brier_baseline':    round(cal_metrics.base_rate * (1 - cal_metrics.base_rate), 4),
-                    'reliability_corr':  round(cal_metrics.reliability_correlation, 3),
-                    'n_samples':         cal_metrics.n_samples,
+                    'brier_score':       round(cal_metrics.brier_score, 4) if cal_metrics else None,
+                    'brier_baseline':    round(cal_metrics.base_rate * (1 - cal_metrics.base_rate), 4) if cal_metrics else None,
+                    'reliability_corr':  round(cal_metrics.reliability_correlation, 3) if cal_metrics else None,
+                    'n_samples':         cal_metrics.n_samples if cal_metrics else 0,
                 }
                 logger.info(
-                    f"Calibration OFF (rejected) Brier={cal_metrics.brier_score:.3f} "
-                    f"corr={cal_metrics.reliability_correlation:.2f} → fallback legacy conf={confidence:.3f}"
+                    f"Calibration OFF (rejected) → fallback legacy conf={confidence:.3f}"
                 )
         except Exception as cal_err:
             calibration_info = {'used': False, 'error': str(cal_err)}

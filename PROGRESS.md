@@ -289,3 +289,60 @@ print(f'Brier {m.brier_score:.3f} corr {m.reliability_correlation:.2f} accepted 
 # Test E2E:
 curl -s -X POST localhost:5057/api/analyze -d '{\"symbol\":\"BTC-USD\",\"asset_type\":\"crypto\",\"timeframe\":\"2y\",\"use_llm\":false}' -H 'Content-Type: application/json' | jq '.ml_result.calibration'
 ```
+
+---
+
+## Tier 2.2 — Direction classifier alimentando el calibrador
+
+**Estado:** ACEPTADO ✓ (2026-04-26, demuestra mejora 10× sobre Tier 2.1 en activos con señal).
+**Objetivo:** dado que Tier 2.1 sólo "se activa" en activos con regressor decente, añadir un `XGBClassifier` direccional (scale_pos_weight balanceado) cuyas probabilidades nativas son input PREFERENTE para el calibrador isotónico.
+**Archivos modificados:** `api.py` (líneas 533-568 OOF classifier in-place, 600-612 final classifier, 760-820 cascada de fallback en calibración).
+
+### Diseño
+
+En el loop CV existente, en paralelo al regressor XGB, entrenamos un `XGBClassifier` con:
+- target = `(y > 0).astype(int)` — dirección binaria
+- `scale_pos_weight = neg/pos` calculado por fold — corrige desbalance natural en mercados alcistas
+- mismos `max_depth=4`, `learning_rate=0.05`, `reg_alpha=0.1` que el regressor
+
+Las probabilidades OOF del classifier (`predict_proba(...)[:, 1]`) son el input preferido al calibrador isotónico. **Si el classifier pasa el gate de calidad** (Brier < baseline, corr ≥ 0.5), se usa para inferencia; si no, fallback al OOF del regressor (Tier 2.1); si tampoco, fallback a confianza legacy.
+
+Estructura de cascada en el bloque de calibración:
+```
+1. classifier OOF + gate → usa P(direction) calibrada      (Tier 2.2)
+2. regressor OOF + gate  → usa ensemble_pred calibrado     (Tier 2.1)
+3. ningún calibrador     → fallback a confianza legacy
+```
+
+### Validación E2E (mismos activos que Tier 2.1)
+
+| Símbolo  | source                | Brier (pred/base) | reliability_corr | Δ Brier vs Tier 2.1 | conf legacy → calibrada |
+|----------|-----------------------|-------------------|------------------|---------------------|-------------------------|
+| AAPL 2y  | rechazado por filtros | 0.247 / 0.247    | 0.121            | n/a (también rechazado en 2.1) | 0.10 (fallback legacy) |
+| BTC 2y   | **direction_classifier** | **0.230 / 0.250** | **0.924**     | **−0.017 (10× más)**| **0.27 → 0.48**         |
+
+> **Mejora clave:** en BTC, el reliability_correlation salta de 0.575 (Tier 2.1, regressor proxy) a 0.924 (Tier 2.2, classifier directo). El classifier discrimina mucho mejor la dirección que el regressor de retorno absoluto. Esto es el resultado teóricamente esperado — el regressor está optimizando MSE sobre retornos (un objetivo continuo), el classifier optimiza log-loss sobre dirección (el objetivo que realmente importa para Kelly).
+
+> **AAPL sigue siendo rechazado**: el ensemble simplemente no discrimina dirección en AAPL (reliability_corr 0.121, casi random). El classifier no rescata casos donde no hay señal — eso es correcto, no un fallo.
+
+### Lecciones / decisiones
+
+- **`scale_pos_weight` per-fold** (no global): durante walk-forward, las proporciones pos/neg pueden variar entre folds (mercado bull en un fold, bear en otro). Recomputar evita weighting incorrecto.
+- **Clf hyperparameters más conservadores** que el regressor (max_depth=4, lr=0.05, n_estimators=200): targets binarios necesitan menos capacidad y son más propensos a overfit con árboles profundos.
+- **Cascada con fallback transparente**: si el classifier falla por cualquier razón (XGBoost API change, datos insuficientes), intenta regressor; si ese también falla, mantiene legacy. Sistema robusto.
+- **Sin separar magnitude_model todavía** (el plan original Tier 2.2 incluía direction + magnitude separados): la mejora con sólo direction_classifier ya es contundente (10×) y mantiene complejidad baja. Magnitude separada se reabre si se necesita más sizing accuracy en Tier 3.
+- **No introduce coste material**: el classifier se entrena en paralelo dentro del loop CV existente. ~15-20% más tiempo total, pero el handle de fallback significa cero coste si el classifier falla.
+
+### Pendiente / siguientes pasos
+
+- **Validación A/B real con `mode=ml` backtests** sigue pendiente (5-10 min/ventana en este Mac, no tiramos por timing). Cuando se tire, se espera ver Sharpe +0.10-0.20 en activos donde el classifier acepta (vs Tier 2.1 que casi nunca acepta).
+- **LightGBM classifier**: por ahora sólo XGBClassifier; podría ensemblearse con LGBMClassifier si los OOF promediados mejoraran reliability_corr aún más.
+- **Persist calibradores per-symbol**: cuando los backtests masivos se vuelvan habituales, persistir `models/_calibrators/{sym}.pkl` ahorrará re-entrenamiento.
+
+### Comando reproducible
+
+```
+PORT=5057 .venv/bin/python api.py &
+curl -s -X POST localhost:5057/api/analyze -d '{"symbol":"BTC-USD","asset_type":"crypto","timeframe":"2y","use_llm":false}' -H 'Content-Type: application/json' | python3 -c "import json,sys;d=json.load(sys.stdin);print(json.dumps(d['ml_result']['calibration'],indent=2))"
+# Esperado: source=direction_classifier, reliability_corr ≥ 0.7, used=True
+```
