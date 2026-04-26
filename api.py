@@ -2162,7 +2162,8 @@ def paper_autonomous_backtest():
         llm = None
         llm_cache = {}     # (sym, 'YYYY-Qn') → recommendation_str
         llm_stats = {'calls': 0, 'cache_hits': 0, 'errors': 0, 'vetoed': 0,
-                     'budget_skipped': 0, 'total_time': 0.0}
+                     'budget_skipped': 0, 'total_time': 0.0,
+                     'sent_real_news': 0, 'sent_implied_only': 0}
         # Budget: si se supera, no se llama más al LLM y se devuelve HOLD por defecto.
         # Esto evita que un backtest se quede colgado durante horas si hay muchos candidatos.
         llm_budget = int(body.get('llm_budget', 60))
@@ -2178,6 +2179,17 @@ def paper_autonomous_backtest():
                 logger.warning(f"LLM gate desactivado por error: {llm_err}")
                 llm = None
                 use_llm = False
+
+        # ── News cache (Tier 1.2) ─────────────────────────────────────────
+        # Reemplaza el hardcode 'sent = "Neutral..."' por implied sentiment
+        # desde mercado + (si hay) noticias reales del cache SQLite.
+        news_cache = None
+        try:
+            from utils.news_cache import NewsCache, build_sentiment_string
+            news_cache = NewsCache()
+        except Exception as nc_err:
+            logger.warning(f"News cache desactivado: {nc_err}")
+            build_sentiment_string = None  # type: ignore
 
         def _quarter_key(ds: str) -> str:
             # ds = 'YYYY-MM-DD' → 'YYYY-Q{1,2,3,4}'
@@ -2218,7 +2230,38 @@ def paper_autonomous_backtest():
             tech = (f"Precio ${close:,.2f}. {trend_str}. ATR ${atr:,.2f}. "
                     f"ADX {f'{adx:.1f}' if adx is not None else 'n/a'}. "
                     f"Volatilidad anualizada {vol:.1f}%.")
+            # ── Sentiment (Tier 1.2): implied desde retornos + cache real opcional ──
             sent = "Neutral (sin feed de noticias en backtest)"
+            if build_sentiment_string is not None:
+                try:
+                    date_map = asset_maps.get(sym, {})
+                    prior_dates = sorted(d for d in date_map if d < ds)
+                    def _ret_pct(n: int) -> float:
+                        if len(prior_dates) < n or close <= 0:
+                            return 0.0
+                        ref = date_map.get(prior_dates[-n], {}).get('close', close)
+                        return (close / ref - 1.0) * 100 if ref > 0 else 0.0
+                    ret_5d  = _ret_pct(5)
+                    ret_20d = _ret_pct(20)
+                    atr_pct = (atr / close * 100) if close > 0 else None
+                    sent, sent_label, n_real = build_sentiment_string(
+                        symbol=sym,
+                        current_date=ds,
+                        ret_5d_pct=ret_5d,
+                        ret_20d_pct=ret_20d,
+                        rsi=day.get('rsi'),
+                        sma50=sma50,
+                        sma200=sma200,
+                        vol_pct=vol,
+                        atr_pct_of_close=atr_pct,
+                        news_cache=news_cache,
+                    )
+                    if n_real > 0:
+                        llm_stats['sent_real_news'] += 1
+                    else:
+                        llm_stats['sent_implied_only'] += 1
+                except Exception as se:
+                    logger.debug(f"sentiment build error {sym} {ds}: {se}")
             risk = (f"Volatilidad {vol:.1f}%. Riesgo "
                     f"{'ALTO' if vol > 40 else 'MEDIO' if vol > 20 else 'BAJO'}.")
             ml_sum = (f"Señal trend-follower: pred={pred:+.4f} "
