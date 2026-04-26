@@ -346,3 +346,62 @@ PORT=5057 .venv/bin/python api.py &
 curl -s -X POST localhost:5057/api/analyze -d '{"symbol":"BTC-USD","asset_type":"crypto","timeframe":"2y","use_llm":false}' -H 'Content-Type: application/json' | python3 -c "import json,sys;d=json.load(sys.stdin);print(json.dumps(d['ml_result']['calibration'],indent=2))"
 # Esperado: source=direction_classifier, reliability_corr ≥ 0.7, used=True
 ```
+
+---
+
+## Tier 3.1 — Features macro / cross-asset
+
+**Estado:** ACEPTADO con caveat ⚠ (2026-04-26, módulo disponible y funcional, pero el efecto neto sobre el ensemble ML es ambiguo en tests single-shot).
+**Objetivo:** enriquecer el feature set con VIX (risk on/off), DXY, term spread (10Y−2Y proxy), retorno relativo vs SPY, BTC dominance proxy, alt-vs-BTC. Hipótesis: regímenes macro están correlacionados con la dirección direccional 5d de equity/crypto.
+**Archivos creados:** funciones `_fetch_macro_series` + `add_cross_asset_features` en `utils/data_utils.py` (140 LoC).
+**Archivos modificados:** `api.py:_train_and_predict_ml` (parámetro `symbol` + llamada a `_add_xa`), `models/ml_models/traditional_ml.py:create_features` (prefijos `macro_` y `xa_` aceptados).
+
+### Diseño
+
+- `_fetch_macro_series(symbol, start, end)`: descarga vía yfinance con cache en memoria (process-lifetime). Series soportadas: `^VIX`, `DX-Y.NYB` (DXY), `^TNX` (10Y), `^IRX` (3M proxy del 2Y), `SPY`, `BTC-USD`, `ETH-USD`.
+- `add_cross_asset_features(df, symbol, asset_type)`: enriquece `df` con 6-9 columnas según asset_type:
+  - **Stocks**: macro_vix_close, macro_vix_chg_5d/20d, macro_dxy_chg_5d/20d, macro_term_spread, xa_excess_5d/20d vs SPY, xa_relative_strength
+  - **Crypto**: macro_vix_close, macro_vix_chg_5d/20d, xa_btc_dominance_proxy, xa_alt_vs_btc_5d/20d
+- Forward-fill para huecos de fines de semana / días festivos.
+- Cache en memoria evita re-descargar la misma serie ~500ms/símbolo.
+
+### Validación E2E (`/api/analyze` 2y, mismo timeframe que Tier 2.1/2.2)
+
+| Símbolo | n_features (Tier 2.2 → 3.1) | conf calibrated | R² XGB | reliability_corr | Brier |
+|---------|------------------------------|----------------|--------|------------------|-------|
+| AAPL    | 47 → 57 (+10)                | 0.10 (rejected)| -0.33 → -0.33 | 0.12 → -0.21 | 0.247 → 0.246 |
+| BTC-USD | 47 → 52 (+5)                 | **0.48 → 0.58 (+0.10)** | -0.06 → -0.11 (peor) | 0.92 → 0.74 (peor pero ✓) | 0.231 → 0.239 (peor) |
+
+**Lectura honesta:**
+- AAPL: ningún cambio relevante. El calibrador sigue rechazando porque AAPL no tiene señal en los modelos individuales.
+- BTC: la confianza calibrada sube +0.10 (predicción ensemble más decisiva por nuevos features), pero **R² XGB se deteriora** (-0.06 → -0.11) y **Brier sube ligeramente** (0.231 → 0.239). El reliability_corr cae de 0.92 a 0.74 — todavía accepted, pero con menos margen.
+
+### Diagnóstico
+
+Los 9 features macro/xa para AAPL y 5 para BTC añaden capacidad sin necesariamente añadir señal predictiva proporcional. Hipótesis del overfitting:
+- VIX correlaciona alto con `volatility_*` y `vol_regime` existentes → multicolinealidad.
+- Series con ffill introducen ruido en regímenes de baja correlación con el activo.
+- 9 nuevos features sobre 240-430 filas de train → ratio observaciones/features baja en CV folds.
+
+### Lecciones / decisiones
+
+- **Implementación correcta y disponible**: el módulo funciona, descargas exitosas, integración limpia.
+- **Efecto en calidad ambigua en single-shot**. La validación A/B real con `mode=ml` backtests sobre múltiples ventanas + bootstrap CI (harness Tier 1.1) no se puede tirar en este Mac por timing/OOM.
+- **Optimización futura sugerida**: reducir el set a 2-3 features más informativas:
+  - Stocks: `macro_vix_close`, `macro_term_spread`, `xa_excess_20d`
+  - Crypto: `macro_vix_close`, `xa_alt_vs_btc_20d`, `xa_btc_dominance_proxy`
+  Eliminar `_5d` versions (correlacionadas con `_20d`) y los DXY chgs (poco predictivos en horizonte de 5 días).
+- **NO desactivar por default**: el classifier sigue siendo accepted para BTC y la confianza sube. El downside de Brier es pequeño (+0.008). Mantener activo y reabrir tras Tier 3 phase 2 (selección).
+
+### Comando reproducible
+
+```
+.venv/bin/python -c "
+import sys; sys.path.insert(0,'.')
+from utils.data_utils import add_cross_asset_features
+import yfinance as yf
+df = yf.Ticker('ETH-USD').history(start='2024-01-01', end='2024-04-01', auto_adjust=False)
+df.index = df.index.tz_localize(None) if df.index.tz else df.index
+print([c for c in add_cross_asset_features(df, 'ETH-USD', 'crypto').columns if c.startswith(('macro_','xa_'))])
+"
+```

@@ -372,7 +372,7 @@ def run_full_analysis(symbol: str, timeframe: str = '1y',
 
     # ── 3. ML models ──────────────────────────
     logger.info(f"[3/6] Training ML models")
-    ml_result = _train_and_predict_ml(df, asset_type=asset_type)
+    ml_result = _train_and_predict_ml(df, asset_type=asset_type, symbol=symbol)
     result['ml'] = ml_result
 
     # ── 4. Multi-agent analysis ──────────────
@@ -408,7 +408,8 @@ def run_full_analysis(symbol: str, timeframe: str = '1y',
 # ML training & prediction
 # ──────────────────────────────────────────────
 def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
-                           prediction_horizon: int = None) -> dict:
+                           prediction_horizon: int = None,
+                           symbol: str = '') -> dict:
     """
     Train ML models (RF, XGBoost, LightGBM, optional LSTM) and produce a
     stacking ensemble prediction on the latest data.
@@ -462,6 +463,16 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
         prediction_horizon = max(1, min(prediction_horizon, 90))
 
         # ── Feature engineering ──────────────────────────────────────────
+        # Tier 3.1: enriquecer con cross-asset macro ANTES de create_features
+        # para que los nuevos prefijos `macro_`/`xa_` se incluyan automáticamente
+        # en self.feature_names si están listados en la tupla de prefijos
+        # aceptados (ver traditional_ml.py:create_features).
+        try:
+            from utils.data_utils import add_cross_asset_features as _add_xa
+            df = _add_xa(df, symbol=symbol or 'unknown', asset_type=asset_type)
+        except Exception as xa_err:
+            logger.warning(f"Cross-asset features skipped: {xa_err}")
+
         feature_engineer = FeatureEngineer()
         df_features = feature_engineer.create_features(df, prediction_horizon=prediction_horizon)
         feature_cols = feature_engineer.feature_names
@@ -1235,7 +1246,8 @@ def _run_historical_backtest(symbol: str, historical_date: str,
     # Previously, the model always predicted 5-day returns but was compared
     # against 30-day actual — a fundamental apples-vs-oranges error.
     ml_result = _train_and_predict_ml(df_train, asset_type=asset_type,
-                                       prediction_horizon=horizon_days)
+                                       prediction_horizon=horizon_days,
+                                       symbol=symbol)
 
     if 'error' in ml_result:
         return {'status': 'error', 'error': f'ML training failed: {ml_result["error"]}'}

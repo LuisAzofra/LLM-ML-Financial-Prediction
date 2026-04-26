@@ -304,6 +304,9 @@ class FeatureEngineer:
             'gap_ret',       # retorno gap overnight
             'intraday_ret',  # retorno intradía
             'recovery_20d',  # recuperación desde mínimo 20d (no 60d)
+            # Tier 3.1: cross-asset macro features (yfinance VIX/DXY/TNX/SPY/BTC)
+            'macro_',        # VIX close/chg, DXY chg, term_spread, US10Y chg
+            'xa_',            # excess vs SPY, relative_strength, BTC dominance, alt_vs_btc
         ))]
 
         return df.dropna()
