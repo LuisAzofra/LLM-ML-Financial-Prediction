@@ -529,6 +529,10 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
         n_splits = max(2, min(5, len(X) // 40))
         tscv = TimeSeriesSplit(n_splits=n_splits, gap=15)
         cv_metrics = {'random_forest': [], 'xgboost': [], 'lightgbm': [], 'hist_gradient': []}
+        # Tier 2.1: recolectar OOF predictions del XGB (proxy del ensemble) para
+        # fit isotónico posterior. Usamos XGB porque es el modelo individual más
+        # informativo en este pipeline (R² más estable que RF, similar a LGBM).
+        oof_xgb = np.full(len(X), np.nan, dtype=float)
 
         for train_idx, test_idx in tscv.split(X):
             X_tr, X_te = X[train_idx], X[test_idx]
@@ -547,6 +551,8 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
                     'mae':  float(mean_absolute_error(y_te, preds)),
                     'r2':   float(r2_score(y_te, preds)),
                 })
+            # Snapshot OOF predictions del XGB para calibración (Tier 2.1)
+            oof_xgb[test_idx] = xgb_fold.predict(X_te)
 
         # Average CV metrics
         model_results = []
@@ -698,6 +704,55 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
             base_conf *= horizon_penalty
 
         confidence = round(max(0.10, min(0.85, base_conf)), 3)
+
+        # ── Tier 2.1: refinamiento con calibración isotónica ────────────
+        # Si las OOF preds del XGB son razonables y el calibrador pasa el
+        # filtro Brier+reliability, refinamos `confidence` con P(retorno>0)
+        # calibrada. En caso contrario, mantenemos la confianza legacy.
+        calibration_info = None
+        try:
+            from utils.calibration import (
+                fit_calibrator_from_oof, combine_confidence, calibrator_path,
+            )
+            cal, cal_metrics = fit_calibrator_from_oof(oof_xgb, y, name='ensemble')
+            if cal is not None:
+                p_cal = float(cal.predict_proba(np.array([ensemble_pred]))[0])
+                conf_cal = combine_confidence(p_cal, agreement_ratio, prediction_horizon)
+                calibration_info = {
+                    'used':                  True,
+                    'p_positive_calibrated': round(p_cal, 4),
+                    'brier_score':           round(cal_metrics.brier_score, 4),
+                    'brier_baseline':        round(cal_metrics.base_rate * (1 - cal_metrics.base_rate), 4),
+                    'reliability_corr':      round(cal_metrics.reliability_correlation, 3),
+                    'n_samples':             cal_metrics.n_samples,
+                    'confidence_legacy':     round(confidence, 3),
+                    'confidence_calibrated': round(conf_cal, 3),
+                }
+                logger.info(
+                    f"Calibration ON  Brier={cal_metrics.brier_score:.3f} "
+                    f"(base {calibration_info['brier_baseline']:.3f}) "
+                    f"corr={cal_metrics.reliability_correlation:.2f}  "
+                    f"p_cal({ensemble_pred:.4f})={p_cal:.3f}  "
+                    f"conf {confidence:.3f} → {conf_cal:.3f}"
+                )
+                confidence = round(conf_cal, 3)
+            else:
+                calibration_info = {
+                    'used':              False,
+                    'reason':            'rejected_by_filters',
+                    'brier_score':       round(cal_metrics.brier_score, 4),
+                    'brier_baseline':    round(cal_metrics.base_rate * (1 - cal_metrics.base_rate), 4),
+                    'reliability_corr':  round(cal_metrics.reliability_correlation, 3),
+                    'n_samples':         cal_metrics.n_samples,
+                }
+                logger.info(
+                    f"Calibration OFF (rejected) Brier={cal_metrics.brier_score:.3f} "
+                    f"corr={cal_metrics.reliability_correlation:.2f} → fallback legacy conf={confidence:.3f}"
+                )
+        except Exception as cal_err:
+            calibration_info = {'used': False, 'error': str(cal_err)}
+            logger.warning(f"Calibration error → fallback legacy: {cal_err}")
+
         direction  = 'SUBE' if ensemble_pred > 0.001 else 'BAJA' if ensemble_pred < -0.001 else 'LATERAL'
 
         # ── Feature importance (XGBoost top-10) — feature-selection aware ─
@@ -728,6 +783,7 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
             'top_features': top_features,
             'stacking_used': use_stacking and meta is not None,
             'lstm_available': lstm_pred_val is not None,
+            'calibration': calibration_info,  # Tier 2.1
         }
 
     except Exception as e:

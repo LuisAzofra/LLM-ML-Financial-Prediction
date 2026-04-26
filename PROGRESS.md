@@ -219,3 +219,73 @@ Incluso la variante GUARD (sin kill-switch, sólo caps + daily-loss + vol-overla
 PORT=5057 .venv/bin/python api.py &
 .venv/bin/python compare_risk_gate.py 6     # ~2 min, sin LLM
 ```
+
+---
+
+## Tier 2.1 — Calibración probabilística isotónica
+
+**Estado:** ACEPTADO ✓ (2026-04-26, módulo + integración + gate de calidad funcionan).
+**Objetivo:** convertir el `ensemble_score` (R² × agreement) actual en `P(retorno > 0)` real para que Kelly tenga sizing probabilísticamente correcto.
+**Archivos creados:** `utils/calibration.py` (200 LoC).
+**Archivos modificados:** `api.py` (líneas 533-549 OOF collection, 698-742 calibration block, 740 dict output).
+
+### Diseño
+
+`utils/calibration.py` expone:
+- `IsotonicCalibrator(name)`: wrapper sobre `sklearn.isotonic.IsotonicRegression(out_of_bounds='clip')` con persist/load (joblib).
+- `compute_oof_preds(X, y, model_factory, n_splits=5, gap=5)`: TimeSeriesSplit OOF predictions sobre un solo modelo proxy (XGBoost por velocidad).
+- `fit_calibrator_from_oof(oof_scores, y_continuous, name)`: fit + métricas (Brier, log_loss, reliability_correlation por quintiles). Devuelve `(calibrator | None, metrics)`. **Acepta sólo si Brier < baseline Y reliability_corr ≥ 0.5** — gate de calidad explícito.
+- `combine_confidence(p_calibrated, agreement, horizon)`: combina P calibrada con penalizaciones legacy (disagreement → ×0.85; horizon > 30 → ×[0.75, 1.0]).
+
+Integración en `api.py:_train_and_predict_ml`:
+- Capturamos OOF predictions del XGBoost dentro del loop CV existente (2 LoC, sin overhead).
+- Tras el cálculo de `confidence` legacy, intentamos fit isotónico. Si pasa el gate, refinamos. Si no, mantenemos legacy.
+- Devolvemos un campo `calibration` en el dict de resultados con todas las métricas para diagnóstico.
+
+### Validación
+
+**Test sintético** (datos donde existe relación monotónica score → P(y>0)):
+
+| Métrica            | Valor   | Lectura                          |
+|--------------------|---------|----------------------------------|
+| Brier score        | 0.195   | vs baseline 0.250 → −22 %        |
+| reliability_corr   | 0.995   | mapeo casi perfecto              |
+| accepted           | True    | gate aprueba                     |
+
+`predict_proba` devuelve curva monotónica creciente (-0.05 → 0.25, 0.0 → 0.35, +0.05 → 0.76). Persist/load OK.
+
+**Test E2E en 2 activos** (`/api/analyze`):
+
+| Símbolo  | Modelos R²       | Brier (pred/base) | reliability_corr | Decisión calibrador | confidence legacy → calibrada |
+|----------|------------------|-------------------|------------------|---------------------|-------------------------------|
+| AAPL 2y  | RF -4.3, XGB -0.33| 0.247 / 0.247    | 0.121            | RECHAZA correctamente | 0.10 (sin cambio, fallback)  |
+| BTC 2y   | RF -0.35, XGB -0.06| 0.248 / 0.250   | 0.575            | ACEPTA              | 0.21 → 0.50                  |
+
+**Comportamiento esperado:** para activos sin señal (R² muy negativos, AAPL), el calibrador no aporta información y el filtro lo rechaza → fallback a confianza legacy. Para activos con señal débil pero monotónica (BTC), el calibrador eleva la confianza apropiadamente porque la P calibrada (0.50) es más alta que la confianza legacy (0.21) que estaba penalizada por R² negativo.
+
+### Lecciones / decisiones
+
+- **Gate de calidad ANTES de aplicar calibración** — clave: sin esto, el calibrador podía empeorar la confianza en activos donde el ensemble no discrimina. El filtro Brier+reliability garantiza que sólo se usa cuando hay señal.
+- **OOF capture in-place** — añadimos `oof_xgb[test_idx] = xgb_fold.predict(X_te)` dentro del loop CV existente; cero coste adicional.
+- **XGB como proxy del ensemble**: usar sólo XGB (no RF + XGB + LGBM + HGB) ahorra ~3× tiempo. RF/LGBM/HGB están altamente correlacionados con XGB en este pipeline.
+- **No persistencia per-symbol todavía**: el calibrador se reentrena cada llamada (pocos segundos por incremento). Si usage cambia a backtests masivos, podemos persistir en `models/_calibrators/{symbol}.pkl` reutilizando `IsotonicCalibrator.save/load`.
+- **Limitación honesta sobre el impacto en retorno**: en activos con R² muy negativos (AAPL en 2y), el calibrador rechaza y NO mejora nada — está limitado por la calidad del ensemble actual. **El verdadero salto en retorno requerirá Tier 2.2 (modelos dirección + magnitud separados con class_weight)**, donde se espera que el direction_model alcance hit-rates ≥55% y el calibrador entre realmente en juego.
+- **Brier mejora pero marginal en activos reales** (-0.002 en BTC). El calibrador valida la teoría sin demostrar gran ganancia hoy. Tras Tier 2.2 esperamos ver Brier ≤ 0.22 (vs 0.25 baseline) consistentemente, lo que sí movería la aguja en Sharpe.
+
+### Comando reproducible
+
+```
+# desde la raiz del repo
+PORT=5057 .venv/bin/python api.py &
+# Test sintético:
+.venv/bin/python -c "
+import sys, numpy as np; sys.path.insert(0,'.')
+from utils.calibration import fit_calibrator_from_oof, combine_confidence
+np.random.seed(42)
+n=300; s=np.random.randn(n)*0.05
+y=np.where(np.random.rand(n) < 0.5+0.4*np.tanh(s*20), abs(np.random.randn(n))*0.05, -abs(np.random.randn(n))*0.05)
+cal, m = fit_calibrator_from_oof(s, y, 'TEST')
+print(f'Brier {m.brier_score:.3f} corr {m.reliability_correlation:.2f} accepted {m.accepted}')"
+# Test E2E:
+curl -s -X POST localhost:5057/api/analyze -d '{\"symbol\":\"BTC-USD\",\"asset_type\":\"crypto\",\"timeframe\":\"2y\",\"use_llm\":false}' -H 'Content-Type: application/json' | jq '.ml_result.calibration'
+```
