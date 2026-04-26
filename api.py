@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta
 import os
 import sys
+import time
 import warnings
 import traceback
 import json
@@ -42,14 +43,23 @@ from sklearn.model_selection import TimeSeriesSplit, cross_val_predict
 from sklearn.linear_model import Ridge, ElasticNet
 from sklearn.preprocessing import StandardScaler
 
-# Optional LSTM/deep learning
-try:
-    from models.ml_models.deep_learning import LSTMModel
-    DEEP_LEARNING_AVAILABLE = True
-    logger.info("TensorFlow/LSTM disponible")
-except Exception:
-    DEEP_LEARNING_AVAILABLE = False
-    logger.info("TensorFlow no disponible - se usarán solo modelos tradicionales")
+# Optional LSTM/deep learning — IMPORT PEREZOSO
+# TensorFlow añade ~700MB al arranque del proceso. En máquinas con swap
+# saturado, eso impide cargar Qwen después. Lo importamos sólo si:
+#   - LIGHTWEIGHT_MODE != '1' (modo completo) Y
+#   - Se desactiva explícitamente con TFG_DISABLE_TF != '1'
+DEEP_LEARNING_AVAILABLE = False
+LSTMModel = None
+if os.environ.get('TFG_LIGHTWEIGHT', '0') != '1' and os.environ.get('TFG_DISABLE_TF', '0') != '1':
+    try:
+        from models.ml_models.deep_learning import LSTMModel  # noqa: F401
+        DEEP_LEARNING_AVAILABLE = True
+        logger.info("TensorFlow/LSTM disponible")
+    except Exception:
+        DEEP_LEARNING_AVAILABLE = False
+        logger.info("TensorFlow no disponible - se usarán solo modelos tradicionales")
+else:
+    logger.info("TensorFlow desactivado (lightweight mode o TFG_DISABLE_TF=1)")
 
 # ──────────────────────────────────────────────
 # Flask app
@@ -68,6 +78,216 @@ TIMEFRAME_MAP = {
     '5M': 30, '1H': 30, '12H': 90,
     '24H': 365, '1W': 365, '1M': 730, '1Y': 1095,
 }
+
+# Proveedor LLM por defecto — controlado por env var para poder elegir
+# 'local' (Qwen2.5 vía transformers, sin Ollama) sin tener que tocar código.
+DEFAULT_LLM_PROVIDER = os.environ.get('TFG_LLM_PROVIDER', 'ollama')
+# Modo ligero: salta Optuna y reduce iteraciones de ML para que ML+LLM
+# entren en RAM en máquinas saturadas de swap. Activar con TFG_LIGHTWEIGHT=1.
+LIGHTWEIGHT_MODE = os.environ.get('TFG_LIGHTWEIGHT', '0') == '1'
+logger.info(f"LLM provider default: {DEFAULT_LLM_PROVIDER}  |  lightweight: {LIGHTWEIGHT_MODE}")
+
+
+# ──────────────────────────────────────────────
+# Lightweight analysis (cabe en RAM con LLM cargado en máquinas saturadas)
+# ──────────────────────────────────────────────
+def run_lightweight_analysis(symbol: str, timeframe: str = '1y',
+                              asset_type: str = 'stock',
+                              llm_provider: str = 'local') -> dict:
+    """
+    Versión ligera de run_full_analysis. Usa el mismo flujo que demo_bot_llm.py:
+      - Descarga datos + indicadores técnicos (sin GARCH).
+      - ML proxy = retorno reciente + momentum (sin XGB/LGB/Optuna).
+      - LLM Qwen2.5-0.5B local: analyze_sentiment + interpret_market_data.
+      - Hybrid score 75% ML / 25% LLM.
+    Devuelve el mismo shape JSON que run_full_analysis para el frontend.
+    """
+    from utils.llm_client import LLMClient
+    days  = TIMEFRAME_MAP.get(timeframe, 365)
+    end   = datetime.now().strftime('%Y-%m-%d')
+    start = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+
+    result = {
+        'symbol': symbol, 'asset_type': asset_type, 'timeframe': timeframe,
+        'start_date': start, 'end_date': end, 'status': 'running',
+        'mode': 'lightweight',
+    }
+
+    loader = FinancialDataLoader()
+    df = loader.download_data(symbol, start, end, asset_type=asset_type)
+    if df is None or df.empty:
+        result['status'] = 'error'
+        result['error'] = f'No data for {symbol}'
+        return result
+
+    actual_symbol = df['Symbol'].iloc[0] if 'Symbol' in df.columns else symbol
+    dp = DataProcessor()
+    df = dp.clean_data(df)
+    df = dp.add_technical_indicators(df)
+    last = df.iloc[-1]
+
+    result['data_info'] = {
+        'records': len(df),
+        'period_start': str(df.index[0].date()),
+        'period_end':   str(df.index[-1].date()),
+        'current_price': round(float(last['Close']), 4),
+        'annualized_volatility': round(float(last.get('Volatility', 0) * 100), 2)
+            if 'Volatility' in df.columns else None,
+    }
+    chart_df = df.tail(min(len(df), 500))
+    result['price_chart'] = {
+        'dates': [str(d.date()) for d in chart_df.index],
+        'close': [round(float(v), 4) for v in chart_df['Close'].values],
+        'sma_20': [round(float(v), 4) if not np.isnan(v) else None
+                   for v in chart_df['SMA_20'].values] if 'SMA_20' in chart_df.columns else [],
+        'sma_50': [round(float(v), 4) if not np.isnan(v) else None
+                   for v in chart_df['SMA_50'].values] if 'SMA_50' in chart_df.columns else [],
+    }
+    result['garch'] = None  # skipped en modo light
+
+    # ── ML proxy ───────────────────────────────────────────────────
+    close = df['Close']
+    r5  = float(close.pct_change(5).iloc[-1])  if len(close) > 5  else 0.0
+    r20 = float(close.pct_change(20).iloc[-1]) if len(close) > 20 else 0.0
+    pred_return = 0.5 * r5 + 0.5 * r20
+    direction = 'UP' if pred_return > 0 else 'DOWN'
+    ml_conf = round(0.5 + min(abs(pred_return) * 10, 0.4), 3)
+    agreement = round(0.7 + min(abs(pred_return) * 5, 0.25), 3)
+    ml_result = {
+        'ensemble_prediction': round(pred_return, 6),
+        'ensemble_confidence': ml_conf,
+        'ensemble_direction':  direction,
+        'model_agreement':     agreement,
+        'best_model':          'lightweight_proxy',
+        'horizon_days':        5,
+        'mode':                'proxy_momentum',
+    }
+    result['ml'] = ml_result
+
+    # ── Resúmenes para el LLM ──────────────────────────────────────
+    rsi    = float(last.get('RSI', 50))    if 'RSI' in df.columns    else 50
+    sma20  = float(last.get('SMA_20', 0))  if 'SMA_20' in df.columns else 0
+    sma50  = float(last.get('SMA_50', 0))  if 'SMA_50' in df.columns else 0
+    sma200 = float(last.get('SMA_200', 0)) if 'SMA_200' in df.columns else 0
+    macd     = float(last.get('MACD', 0))        if 'MACD' in df.columns        else 0
+    macd_sig = float(last.get('MACD_signal', 0)) if 'MACD_signal' in df.columns else 0
+    volat = float(last.get('Volatility', 0) * 100) if 'Volatility' in df.columns else 0
+    price = float(last['Close'])
+
+    trend = []
+    if sma20 and sma50:  trend.append('SMA20>SMA50' if sma20 > sma50 else 'SMA20<SMA50')
+    if sma50 and sma200: trend.append('SMA50>SMA200' if sma50 > sma200 else 'SMA50<SMA200')
+    trend_txt = ', '.join(trend) or 'n/a'
+
+    technical_summary = (
+        f"Precio actual ${price:,.2f}. RSI {rsi:.1f} "
+        f"({'sobreventa' if rsi<30 else 'sobrecompra' if rsi>70 else 'neutral'}). "
+        f"MACD {macd:.4f} vs signal {macd_sig:.4f}. Tendencia: {trend_txt}. "
+        f"Vol anualizada {volat:.1f}%."
+    )
+    risk_summary = (
+        f"Vol {volat:.1f}% anualizada. "
+        f"Riesgo {'ALTO' if volat>40 else 'MEDIO' if volat>20 else 'BAJO'}."
+    )
+    ml_summary = (
+        f"ML proxy: retorno esperado 5d {pred_return*100:+.2f}%, conf {ml_conf:.2f}, "
+        f"acuerdo {agreement:.2f}, dirección {direction}."
+    )
+
+    # ── LLM ────────────────────────────────────────────────────────
+    llm = LLMClient(provider=llm_provider)
+    news_text = (
+        f"{actual_symbol} cotiza a ${price:,.2f}. RSI {rsi:.0f}. "
+        f"Tendencia {trend_txt}. Vol {volat:.0f}%. Retorno 20d {r20*100:+.1f}%."
+    )
+    sent = llm.analyze_sentiment(news_text)
+    sent_p = sent.get('parsed', {}) if isinstance(sent, dict) else {}
+    sent_label = sent_p.get('sentiment', 'neutral')
+    sent_score = float(sent_p.get('score', 0) or 0)
+    sent_conf  = float(sent_p.get('confidence', 0.5) or 0.5)
+
+    sentiment_summary = (
+        f"Sentimiento: {sent_label.upper()} (score {sent_score:+.2f}, conf {sent_conf:.2f}). "
+        f"{str(sent_p.get('reasoning',''))[:160]}"
+    )
+    mkt = llm.interpret_market_data(
+        technical_summary=technical_summary,
+        sentiment_summary=sentiment_summary,
+        risk_summary=risk_summary,
+        ml_summary=ml_summary,
+    )
+    mkt_p = mkt.get('parsed', {}) if isinstance(mkt, dict) else {}
+    raw_rec = str(mkt_p.get('recommendation', 'HOLD')).upper().strip()
+    if '|' in raw_rec:  # placeholder de modelo pequeño
+        raw_rec = 'HOLD'
+    llm_conf = float(mkt_p.get('confidence', 0.5) or 0.5)
+
+    # ── Estructura agents (lo que espera el frontend) ──────────────
+    individual = {
+        'technical': {
+            'recommendation': ('COMPRAR' if pred_return > 0 else 'VENDER' if pred_return < 0 else 'MANTENER'),
+            'confidence': round(ml_conf, 3),
+            'reasoning': technical_summary,
+        },
+        'sentiment': {
+            'recommendation': ('COMPRAR' if sent_score > 0.2 else 'VENDER' if sent_score < -0.2 else 'MANTENER'),
+            'confidence': round(sent_conf, 3),
+            'reasoning': sentiment_summary,
+        },
+        'risk': {
+            'recommendation': 'MEDIO',
+            'confidence': 0.7,
+            'reasoning': risk_summary,
+        },
+        'ml_prediction': {
+            'recommendation': direction,
+            'confidence': ml_conf,
+            'reasoning': ml_summary,
+        },
+    }
+    REC_MAP = {'BUY': 'COMPRAR', 'SELL': 'VENDER', 'HOLD': 'MANTENER',
+               'WAIT': 'ESPERAR', 'STRONG_BUY': 'COMPRAR_FUERTE', 'STRONG_SELL': 'VENDER_FUERTE'}
+    final_dec = REC_MAP.get(raw_rec, raw_rec)
+    result['agents'] = {
+        'final_decision':   final_dec,
+        'final_confidence': round(llm_conf, 3),
+        'final_reasoning':  str(mkt_p.get('reasoning', ''))[:600],
+        'individual':       individual,
+    }
+
+    # ── Hybrid score ───────────────────────────────────────────────
+    ml_signal = max(-1.0, min(1.0, pred_return * 100))
+    DEC_TO_SIG = {'COMPRAR': 0.7, 'COMPRAR_FUERTE': 1.0, 'VENDER': -0.7,
+                  'VENDER_FUERTE': -1.0, 'MANTENER': 0.0, 'ESPERAR': 0.0}
+    llm_signal = DEC_TO_SIG.get(final_dec, 0.0)
+    hybrid_score = 0.75 * ml_signal * ml_conf + 0.25 * llm_signal * llm_conf
+    hybrid_conf  = 0.75 * ml_conf + 0.25 * llm_conf
+    disagree = (ml_signal > 0 and llm_signal < 0) or (ml_signal < 0 and llm_signal > 0)
+    if disagree:
+        hybrid_rec = 'MANTENER'
+    elif hybrid_score > 0.4:
+        hybrid_rec = 'COMPRAR'
+    elif hybrid_score < -0.4:
+        hybrid_rec = 'VENDER'
+    else:
+        hybrid_rec = 'MANTENER'
+    result['hybrid'] = {
+        'score':              round(hybrid_score, 4),
+        'confidence':         round(hybrid_conf, 3),
+        'recommendation':     hybrid_rec,
+        'direction_conflict': bool(disagree),
+        'ml_signal':          round(ml_signal, 3),
+        'llm_signal':         round(llm_signal, 3),
+    }
+    result['status'] = 'success'
+    result['summary'] = {
+        'recommendation': hybrid_rec,
+        'hybrid_score':   result['hybrid']['score'],
+        'confidence':     result['hybrid']['confidence'],
+        'ml_direction':   direction,
+        'agent_decision': final_dec,
+    }
+    return result
 
 
 # ──────────────────────────────────────────────
@@ -286,7 +506,7 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
 
         # ── Optuna hyperparameter tuning on REDUCED feature set ───────────
         ml_models_obj = TraditionalMLModels()
-        if len(X) > 200:
+        if len(X) > 200 and not LIGHTWEIGHT_MODE:
             tuned = ml_models_obj.tune_hyperparameters(X, y, n_trials=25)
             if 'xgboost' in tuned:
                 tuned['xgboost'].update({'random_state': 42, 'n_jobs': -1})
@@ -294,6 +514,15 @@ def _train_and_predict_ml(df: pd.DataFrame, asset_type: str = 'stock',
             if 'lightgbm' in tuned:
                 tuned['lightgbm'].update({'random_state': 42, 'verbose': -1})
                 lgb_params = tuned['lightgbm']
+        if LIGHTWEIGHT_MODE:
+            # Reducir #estimators para minimizar pico de RAM al entrenar
+            # 4 modelos en serie + Qwen-0.5B cargado en memoria.
+            for _p in (rf_params, xgb_params, lgb_params):
+                if 'n_estimators' in _p:
+                    _p['n_estimators'] = min(_p['n_estimators'], 100)
+            if 'max_iter' in hgb_params:
+                hgb_params['max_iter'] = min(hgb_params['max_iter'], 100)
+            logger.info("LIGHTWEIGHT_MODE: Optuna OFF · n_estimators=100")
 
         # ── Walk-forward cross-validation for honest metrics ─────────────
         # gap=15: embargo 5 bars + sequence length 10 — evita leakage de overlapping labels
@@ -588,23 +817,31 @@ def _compute_hybrid_score(ml_result: dict, agent_result: dict) -> dict:
     llm_signal = decision_map.get(decision, 0.0)
     llm_conf = agent_result.get('final_confidence', 0.5)
 
-    # ML carries more weight — it has a quantitative edge over LLM narrative
-    ml_weight  = 0.60
-    llm_weight = 0.40
+    # ML carries much more weight — it has a quantitative edge over LLM narrative.
+    # Antes: 60/40.  Ahora: 75/25 porque el LLM local (qwen2.5) aporta sesgo ruidoso
+    # y bloqueaba señales ML buenas a través del veto de dirección.
+    ml_weight  = 0.75
+    llm_weight = 0.25
 
     hybrid_score = float(ml_signal * ml_weight + llm_signal * llm_weight)
 
-    # ── Direction-consistency veto ────────────────────────────────────────
-    # If ML and LLM point in opposite directions, the correct answer is
-    # "we don't know" → cap the recommendation at MANTENER.
+    # ── Direction penalty (ya NO veto) ──────────────────────────────────────
+    # Cuando ML y LLM discrepan, penalizamos la confianza y reducimos la magnitud
+    # del score un 40% — pero NO lo clampamos a MANTENER.  Si ML es muy decisivo,
+    # su señal debe pasar.  (El veto anterior convertía la mayoría de los BUY
+    # ML-correctos en MANTENER por disagreement con el LLM.)
     ml_dir  = 1 if ml_pred > 0.0005 else (-1 if ml_pred < -0.0005 else 0)
     llm_dir = 1 if llm_signal > 0 else (-1 if llm_signal < 0 else 0)
-    if ml_dir != 0 and llm_dir != 0 and ml_dir != llm_dir:
-        # Clamp to MANTENER range (-0.14, 0.14)
-        hybrid_score = max(-0.14, min(0.14, hybrid_score))
+    direction_conflict = ml_dir != 0 and llm_dir != 0 and ml_dir != llm_dir
+    if direction_conflict:
+        hybrid_score *= 0.60
 
     hybrid_score = round(hybrid_score, 4)
-    hybrid_confidence = round(float(ml_conf * ml_weight + llm_conf * llm_weight), 4)
+    # Penalizamos la confianza híbrida si había conflicto de dirección
+    hybrid_confidence_raw = float(ml_conf * ml_weight + llm_conf * llm_weight)
+    if direction_conflict:
+        hybrid_confidence_raw *= 0.80
+    hybrid_confidence = round(hybrid_confidence_raw, 4)
 
     if hybrid_score > 0.4:
         recommendation = 'COMPRA_FUERTE'
@@ -625,7 +862,7 @@ def _compute_hybrid_score(ml_result: dict, agent_result: dict) -> dict:
         'llm_signal': round(float(llm_signal), 4),
         'ml_weight': ml_weight,
         'llm_weight': llm_weight,
-        'direction_conflict': bool(ml_dir != 0 and llm_dir != 0 and ml_dir != llm_dir),
+        'direction_conflict': bool(direction_conflict),
     }
 
 
@@ -645,16 +882,44 @@ def health():
 @app.route('/api/ollama-status', methods=['GET'])
 def ollama_status():
     """
-    Check whether Ollama is running locally and which models are available.
-    Called by the frontend on page load and before analysis.
+    Health badge del LLM. Provider-aware:
+      · ollama       → ping http://localhost:11434/api/tags
+      · local        → reportamos siempre 'running' con TFG_LOCAL_LLM
+      · huggingface  → 'running' con el modelo HF configurado
+    Llamado por el frontend al cargar y cada 30 s.
     """
+    provider = DEFAULT_LLM_PROVIDER
+
+    # Local transformers (subproceso): siempre disponible mientras la app corra
+    if provider == 'local':
+        local_model = os.environ.get('TFG_LOCAL_LLM', 'Qwen/Qwen2.5-0.5B-Instruct')
+        return jsonify({
+            'status': 'running',
+            'provider': 'local',
+            'models': [local_model],
+            'active_model': local_model,
+            'model_count': 1,
+            'message': f'LLM local ({local_model}) carga bajo demanda en subproceso.',
+        })
+
+    if provider == 'huggingface':
+        hf_model = os.environ.get('TFG_HF_MODEL', 'mistralai/Mistral-7B-Instruct-v0.2')
+        return jsonify({
+            'status': 'running',
+            'provider': 'huggingface',
+            'models': [hf_model],
+            'active_model': hf_model,
+            'model_count': 1,
+            'message': f'HuggingFace Inference API ({hf_model}).',
+        })
+
+    # provider == 'ollama' (default) → ping real
     import requests as req
     try:
         resp = req.get('http://localhost:11434/api/tags', timeout=3)
         if resp.status_code == 200:
             models = resp.json().get('models', [])
             model_names = [m['name'] for m in models]
-            # Prefer qwen2.5 first (mejor modelo para este hardware), luego alternativas
             preferred_order = [
                 'qwen2.5:7b', 'qwen2.5',
                 'llama3.1:8b', 'llama3.1', 'llama3:8b', 'llama3',
@@ -670,6 +935,7 @@ def ollama_status():
                     break
             return jsonify({
                 'status': 'running',
+                'provider': 'ollama',
                 'models': model_names,
                 'active_model': active_model,
                 'model_count': len(model_names),
@@ -678,6 +944,7 @@ def ollama_status():
         pass
     return jsonify({
         'status': 'offline',
+        'provider': 'ollama',
         'models': [],
         'active_model': None,
         'message': 'Ollama no está corriendo. Ejecuta: ollama serve',
@@ -705,13 +972,40 @@ def analyze():
     logger.info(f"=== Analysis requested: {symbol} ({asset_type}) timeframe={timeframe} ===")
 
     try:
-        result = run_full_analysis(
-            symbol=symbol,
-            timeframe=timeframe,
-            asset_type=asset_type,
-            use_llm=True,
-            llm_provider='ollama',
-        )
+        # SIEMPRE ejecutamos el análisis en un subproceso para aislar la
+        # memoria del LLM. El subproceso elige modo full / lightweight según
+        # TFG_LIGHTWEIGHT. Esto mantiene el server Flask en <100 MB y permite
+        # cargar Qwen-1.5B (o mayor) sin riesgo de SIGKILL del Flask.
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        cmd = [sys.executable, '-u', os.path.join(here, 'cli_analyze.py'),
+               symbol, timeframe, asset_type, DEFAULT_LLM_PROVIDER]
+        env = os.environ.copy()
+        env.setdefault('TFG_LLM_PROVIDER', DEFAULT_LLM_PROVIDER)
+        # Timeout largo: pipeline completo con Optuna+CV+LLM puede ir a ~3-5 min
+        timeout_s = 600 if not LIGHTWEIGHT_MODE else 300
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=timeout_s, env=env, cwd=here,
+            )
+        except subprocess.TimeoutExpired:
+            return jsonify({'status': 'error',
+                            'error': f'subprocess timeout (>{timeout_s}s)'}), 504
+        if proc.returncode != 0:
+            logger.error(f"cli_analyze stderr:\n{proc.stderr[-2000:]}")
+            return jsonify({
+                'status': 'error',
+                'error':  f'cli_analyze exit {proc.returncode}',
+                'stderr': proc.stderr[-2000:],
+            }), 500
+        try:
+            result = json.loads(proc.stdout)
+        except Exception as je:
+            return jsonify({
+                'status': 'error', 'error': f'invalid json from cli: {je}',
+                'stdout_tail': proc.stdout[-500:],
+            }), 500
         return jsonify(result)
     except Exception as e:
         logger.error(f"Analysis error: {traceback.format_exc()}")
@@ -969,7 +1263,13 @@ def _generate_bot_predictions(df: pd.DataFrame, asset_type: str = 'stock',
     # Usar clasificación de dirección (0=baja, 1=sube) en lugar de regresión de magnitud.
     # La magnitud del retorno es muy difícil de predecir; la dirección es más estable
     # y permite calibrar confianza como probabilidad (predict_proba).
-    X, y_dir = feature_engineer.prepare_ml_data(df_features, feature_cols, 'target_direction')
+    # seq_length=1: usamos solo la fila más reciente en lugar de apilar 5 días.
+    # Motivo (Red Team): con 27 features, seq=5 genera 135 columnas de las cuales
+    # muchas son redundantes (sma_50, return_10d ya incorporan lookback), lo que
+    # amplifica overfitting cuando el clasificador tiene que discriminar en un
+    # régimen OOS distinto al de entrenamiento. Con seq=1 el modelo ve
+    # directamente el estado ACTUAL del mercado sin hinchazón dimensional.
+    X, y_dir = feature_engineer.prepare_ml_data(df_features, feature_cols, 'target_direction', seq_length=1)
     y = y_dir  # usamos dirección (0/1) para entrenar los clasificadores
 
     # ── Split train / test ANTES de feature selection (anti-leakage) ─────────
@@ -1033,62 +1333,129 @@ def _generate_bot_predictions(df: pd.DataFrame, asset_type: str = 'stock',
     y_train_int = y_train.astype(int)
     y_test_int  = y_test.astype(int)
 
-    # Entrenar clasificadores — predict_proba da probabilidad de subida (clase 1)
-    rf    = RandomForestClassifier(**rf_p).fit(X_train, y_train_int)
-    xgb_m = xgb.XGBClassifier(**xgb_p).fit(X_train, y_train_int)
-    lgb_m = lgb.LGBMClassifier(**lgb_p).fit(X_train, y_train_int)
-    hgb_m = HistGradientBoostingClassifier(**hgb_p).fit(X_train, y_train_int)
+    # ── WALK-FORWARD RETRAINING ─────────────────────────────────────────────
+    # En lugar de entrenar UNA vez con el 70% inicial y predecir todo el test
+    # (expuesto a régimen-shift), reentrenamos el ensemble cada `retrain_freq`
+    # días del test usando ventana expanding (todo el histórico disponible
+    # hasta `prediction_horizon` días antes del bloque, para purgar solapes).
+    # Cada bloque se predice con un ensemble FRESCO cuyos pesos se estiman vía
+    # TimeSeriesSplit sobre su propio histórico (sin leakage del bloque de
+    # predicción).
+    from sklearn.model_selection import TimeSeriesSplit
 
-    # Regresión logística calibrada (diversificación lineal vs tree-based)
-    _scaler = StandardScaler()
-    X_train_sc = _scaler.fit_transform(X_train)
-    X_test_sc  = _scaler.transform(X_test)
-    lr_m = LogisticRegression(C=0.1, max_iter=500, random_state=42)
-    lr_m.fit(X_train_sc, y_train_int)
+    retrain_freq = 20  # reentrenar cada 20 días (~1 mes de trading)
+    n_test = len(X_test)
+    model_names = ['random_forest', 'xgboost', 'lightgbm', 'hist_gradient', 'logistic']
 
-    # Métricas de validación en test set
-    # base_proba_test: dict de probabilidad de clase 1 (P(subida)) por modelo
+    # Probas concatenadas por modelo y del ensemble
+    per_model_proba = {name: np.zeros(n_test) for name in model_names}
+    ensemble_proba  = np.zeros(n_test)
+    cv_acc_per_block = {name: [] for name in model_names}
+
+    def _build_model(name):
+        if name == 'random_forest':  return RandomForestClassifier(**rf_p)
+        if name == 'xgboost':        return xgb.XGBClassifier(**xgb_p)
+        if name == 'lightgbm':       return lgb.LGBMClassifier(**lgb_p)
+        if name == 'hist_gradient':  return HistGradientBoostingClassifier(**hgb_p)
+        if name == 'logistic':       return LogisticRegression(C=0.1, max_iter=500, random_state=42)
+        raise ValueError(name)
+
+    def _fit_predict(name, X_tr, y_tr, X_pr):
+        """Entrena `name` sobre (X_tr, y_tr) y devuelve P(sube) para X_pr."""
+        model = _build_model(name)
+        if name == 'logistic':
+            sc = StandardScaler().fit(X_tr)
+            model.fit(sc.transform(X_tr), y_tr)
+            return model.predict_proba(sc.transform(X_pr))[:, 1]
+        model.fit(X_tr, y_tr)
+        return model.predict_proba(X_pr)[:, 1]
+
+    for block_start in range(0, n_test, retrain_freq):
+        block_end = min(block_start + retrain_freq, n_test)
+        # El training "walk-forward" crece con cada bloque: todo lo que está
+        # antes del bloque menos la zona de purga (horizonte de predicción).
+        # Indices en el array X global: train = [0 .. n_train + block_start - horizon]
+        safe_end = n_train + block_start - prediction_horizon
+        if safe_end < 50:
+            continue
+        X_tr = X[:safe_end, selected_indices]
+        y_tr = y[:safe_end].astype(int)
+        X_pr = X_test[block_start:block_end]
+
+        # CV sobre TRAIN de este bloque — estima edge por modelo sin tocar el bloque
+        block_cv_acc = {name: 0.5 for name in model_names}
+        try:
+            tscv = TimeSeriesSplit(n_splits=min(5, max(2, len(X_tr) // 60)))
+            cv_accs_local = {name: [] for name in model_names}
+            for tr_idx, va_idx in tscv.split(X_tr):
+                if len(tr_idx) < 30 or len(va_idx) < 5:
+                    continue
+                yt = y_tr[tr_idx]; yv = y_tr[va_idx]
+                for name in model_names:
+                    p = _fit_predict(name, X_tr[tr_idx], yt, X_tr[va_idx])
+                    cv_accs_local[name].append(float(accuracy_score(yv, (p >= 0.5).astype(int))))
+            block_cv_acc = {n: (sum(v)/len(v) if v else 0.5) for n, v in cv_accs_local.items()}
+        except Exception as _cv_err:
+            logger.debug(f"CV bloque {block_start} falló: {_cv_err}")
+
+        for name in model_names:
+            cv_acc_per_block[name].append(block_cv_acc[name])
+
+        # Pesos del bloque según edge (acc − 0.50)² + ε
+        b_weights = {n: (max(block_cv_acc[n] - 0.50, 0.0) ** 2 + 1e-4) for n in model_names}
+        total_bw = sum(b_weights.values())
+
+        # Entrenar cada modelo sobre TODO el train y predecir el bloque completo
+        block_ensemble = np.zeros(block_end - block_start)
+        for name in model_names:
+            p = _fit_predict(name, X_tr, y_tr, X_pr)
+            per_model_proba[name][block_start:block_end] = p
+            block_ensemble += p * (b_weights[name] / total_bw)
+        ensemble_proba[block_start:block_end] = block_ensemble
+
+    # Métricas OOS por modelo (accuracy real sobre el test set completo)
     model_metrics = []
-    base_proba_test = {}
-    for name, model, X_te in [('random_forest', rf, X_test),
-                               ('xgboost', xgb_m, X_test),
-                               ('lightgbm', lgb_m, X_test),
-                               ('hist_gradient', hgb_m, X_test),
-                               ('logistic', lr_m, X_test_sc)]:
-        proba = model.predict_proba(X_te)[:, 1]  # P(sube)
-        base_proba_test[name] = proba
-        pred_dir = (proba >= 0.5).astype(int)
-        acc = float(accuracy_score(y_test_int, pred_dir))
+    for name in model_names:
+        p_full = per_model_proba[name]
+        pred_dir_m = (p_full >= 0.5).astype(int)
+        acc_m = float(accuracy_score(y_test_int, pred_dir_m))
         model_metrics.append({
             'name': name,
-            'accuracy': round(acc, 4),
-            'rmse': round(float(np.sqrt(mean_squared_error(y_test_int, proba))), 6),
-            'r2':   round(float(r2_score(y_test_int, proba)), 6),
+            'accuracy': round(acc_m, 4),
+            'rmse': round(float(np.sqrt(mean_squared_error(y_test_int, p_full))), 6),
+            'r2':   round(float(r2_score(y_test_int, p_full)), 6),
+            'cv_accuracy_mean': round(
+                (sum(cv_acc_per_block[name]) / len(cv_acc_per_block[name]))
+                if cv_acc_per_block[name] else 0.5, 4
+            ),
+            'n_retrain_blocks': len(cv_acc_per_block[name]),
         })
 
-    # Ensemble final: promedio ponderado de probabilidades por accuracy
-    # Modelos con accuracy > 0.50 tienen más peso; <0.50 se penalizan
-    acc_map = {m['name']: m['accuracy'] for m in model_metrics}
-    weights = {}
-    for name in base_proba_test:
-        acc = acc_map.get(name, 0.5)
-        weights[name] = max(acc - 0.40, 0.01)  # peso = edge sobre 40% base
-
-    total_w = sum(weights.values())
-    ensemble_proba = np.zeros(len(X_test))
-    for name, proba in base_proba_test.items():
-        ensemble_proba += proba * (weights[name] / total_w)
-
     # Convertir probabilidad → señal de retorno predicho
-    # pred_return = +/- magnitud fija (1% por defecto) × signo dado por la probabilidad
-    # La magnitud no se predice (modelos no tienen edge de magnitud); solo la dirección.
-    PRED_MAGNITUDE = 0.01  # 1% retorno "esperado" por señal — solo afecta Kelly sizing
-    ensemble_preds = (ensemble_proba - 0.5) * 2 * PRED_MAGNITUDE  # [-0.01, +0.01]
+    # La magnitud es ADAPTATIVA: usamos la volatilidad histórica esperada sobre el
+    # horizonte de predicción como tamaño "natural" del movimiento esperado. Antes
+    # usábamos 0.01 fijo lo que hacía que Kelly no escalara por activo (un activo
+    # volátil y uno estable generaban el mismo sizing).
+    try:
+        _daily_ret = df['Close'].pct_change().dropna()
+        _daily_vol_est = float(_daily_ret.std())
+    except Exception:
+        _daily_vol_est = 0.015
+    # Movimiento esperado en `prediction_horizon` días ≈ σ_daily · √h
+    horizon_move_est = _daily_vol_est * np.sqrt(prediction_horizon)
+    # Magnitud calibrada: entre 0.5% y 4%. En cripto (vol alta) será ~3-4%, en stocks ~0.8-1.8%.
+    PRED_MAGNITUDE = float(np.clip(horizon_move_est * 0.60, 0.005, 0.04))
+    # proba=0.50 → pred=0.  proba=0.80 → pred = 0.6 · PRED_MAGNITUDE (no saturado)
+    # proba=1.00 → pred = PRED_MAGNITUDE (máximo)
+    edge = (ensemble_proba - 0.5) * 2  # [-1, +1]
+    ensemble_preds = edge * PRED_MAGNITUDE
 
     # Confianza = distancia desde 0.5 (azar) normalizada a [0,1]
-    # P=0.5 → conf=0.0 (sin edge), P=1.0 → conf=1.0 (certeza total)
+    # P=0.5 → conf=0.0 (sin edge), P=1.0 → conf=1.0 (certeza total).
+    # El rango se amplía a [0.15, 0.90] para que señales muy claras puedan superar
+    # el umbral Kelly (antes el cap de 0.85 limitaba demasiado con b_min=0.5).
     raw_confidence = np.abs(ensemble_proba - 0.5) * 2
-    confidences = np.clip(0.15 + raw_confidence * 0.70, 0.15, 0.85)
+    confidences = np.clip(0.15 + raw_confidence * 0.78, 0.15, 0.90)
 
     # ── Accuracy gate: solo operar si el clasificador supera al azar ────────
     # Un clasificador con accuracy ≤ 50% tiene edge negativo → no operar.
@@ -1097,9 +1464,13 @@ def _generate_bot_predictions(df: pd.DataFrame, asset_type: str = 'stock',
         pred_dir_gate = (ensemble_preds > 0).astype(int)
         direction_accuracy = float(np.mean(pred_dir_gate == y_test_int))
         logger.info(f"Direction accuracy OOS: {direction_accuracy:.3f} ({len(y_test_int)} samples)")
-        if direction_accuracy <= 0.50:
+        # Gate estricto: sólo `< 0.50` bloquea. 0.500 exacto es el empate con el
+        # azar; no es edge negativo. Bloquearlo eliminaba señales buenas por
+        # variancia en periodos cortos (p.ej. 82/164 aciertos). Mantenemos el
+        # veto sólo cuando la accuracy está *claramente* por debajo del azar.
+        if direction_accuracy < 0.50:
             logger.warning(
-                f"Direction accuracy {direction_accuracy:.3f} ≤ 0.50 — modelo sin edge. "
+                f"Direction accuracy {direction_accuracy:.3f} < 0.50 — modelo sin edge. "
                 "Bot no operará en este activo (señales zeroed)."
             )
             ensemble_preds = np.zeros_like(ensemble_preds)
@@ -1376,6 +1747,32 @@ def _generate_bot_predictions_by_date(
     X_train = X_train_raw[:, selected_indices]
     X_test  = X_test[:, selected_indices]
 
+    # ── Calidad pre-test del activo (sin leakage) ────────────────────────────
+    # Walk-forward CV sobre el TRAINING set: nunca toca el test.
+    # Usamos un xgb rápido como proxy del ensemble. R² promedio entre folds
+    # es nuestra estimación de "qué tan modelable es este activo".
+    # Activos con val_r2 << 0 → el ML no aporta señal real → mejor descartar.
+    train_validation_r2 = 0.0
+    try:
+        from sklearn.model_selection import TimeSeriesSplit
+        tscv = TimeSeriesSplit(n_splits=3, gap=prediction_horizon)
+        fold_r2s = []
+        for tr_idx, va_idx in tscv.split(X_train):
+            if len(tr_idx) < 50 or len(va_idx) < 10:
+                continue
+            proxy = xgb.XGBRegressor(
+                n_estimators=80, max_depth=4, learning_rate=0.1,
+                subsample=0.8, colsample_bytree=0.7,
+                random_state=42, n_jobs=-1,
+            )
+            proxy.fit(X_train[tr_idx], y_train[tr_idx])
+            pv = proxy.predict(X_train[va_idx])
+            fold_r2s.append(float(r2_score(y_train[va_idx], pv)))
+        if fold_r2s:
+            train_validation_r2 = float(np.mean(fold_r2s))
+    except Exception as _cv_err:
+        logger.debug(f"train_validation_r2 cv error: {_cv_err}")
+
     # ── Hiperparámetros según tipo de activo ─────────────────────────────────
     if asset_type == 'crypto':
         rf_p  = dict(n_estimators=150, max_depth=5, random_state=42, n_jobs=-1)
@@ -1436,11 +1833,18 @@ def _generate_bot_predictions_by_date(
     except Exception as nn_err:
         logger.warning(f"Neural ensemble error en backtest histórico: {nn_err}")
 
-    # ── Ensemble ponderado por inverse-RMSE ──────────────────────────────────
+    # ── Ensemble ponderado por inverse-RMSE, pero penalizando R² negativo ────
+    # Un modelo con R² < 0 predice peor que la media y NO debe tener peso sustancial.
+    # Usamos un peso combinado: inverse-RMSE × max(R²+0.05, 0.02)² que colapsa a casi
+    # cero cuando el R² es muy negativo.
     n_preds = len(X_test)
     rmse_map = {m['name']: m['rmse'] for m in model_metrics}
-    weights = {name: 1.0 / max(rmse_map.get(name, 0.01), 1e-9)
-               for name in base_preds_test}
+    r2_map   = {m['name']: m['r2']   for m in model_metrics}
+    weights = {}
+    for name in base_preds_test:
+        rmse_w = 1.0 / max(rmse_map.get(name, 0.01), 1e-9)
+        r2_adj = max(r2_map.get(name, -0.5) + 0.05, 0.02)  # R²=-0.3 → 0.02, R²=0 → 0.05, R²=0.3 → 0.35
+        weights[name] = rmse_w * (r2_adj ** 2)
     total_w = sum(weights.values())
     ensemble_preds = np.zeros(n_preds)
     for name, preds in base_preds_test.items():
@@ -1454,10 +1858,18 @@ def _generate_bot_predictions_by_date(
     ens_sign = np.sign(ensemble_preds).reshape(-1, 1)
     model_signs = np.sign(all_preds_matrix)
     agreement = np.mean(model_signs == ens_sign, axis=1)
-    confidences = np.clip(0.30 + agreement * 0.50, 0.15, 0.85)
+    confidences = np.clip(0.25 + agreement * 0.60, 0.15, 0.90)
+    # Capear por magnitud de la predicción: señales microscópicas → confianza baja
     pred_mag = np.abs(ensemble_preds)
-    conf_cap = np.clip(0.35 + pred_mag / 0.002 * 0.50, 0.35, 0.85)
+    conf_cap = np.clip(0.35 + pred_mag / 0.002 * 0.55, 0.30, 0.90)
     confidences = np.minimum(confidences, conf_cap)
+    # Penalizar por calidad media del ensemble (si los modelos son malos en OOS,
+    # la confianza no puede ser alta sea cual sea el acuerdo)
+    mean_r2 = float(np.mean(list(r2_map.values()))) if r2_map else 0.0
+    if mean_r2 < -0.10:
+        confidences *= 0.70  # claro underperformer → rebajar confianza un 30%
+    elif mean_r2 < 0.0:
+        confidences *= 0.85
 
     # ── Índice en df original del primer día de test ──────────────────────────
     test_start_idx_in_df = df_features.index[n_train]
@@ -1471,6 +1883,8 @@ def _generate_bot_predictions_by_date(
         'confidences':      confidences,
         'test_start_idx':   test_start_loc,
         'model_metrics':    model_metrics,
+        'mean_r2':          float(mean_r2),
+        'train_validation_r2': float(train_validation_r2),
         'n_train':          n_train,
         'n_test':           n_test,
         'prediction_horizon': prediction_horizon,
@@ -1505,6 +1919,36 @@ def paper_autonomous_backtest():
     sig_pct       = float(body.get('signal_percentile', 0.80))
     kelly_sc      = float(body.get('kelly_scale', 0.30))
     commission_rate = float(body.get('commission_rate', 0.001))  # default 0.1%
+    # mode = 'trend' (default) → trend-follower puro Faber/Antonacci (sin ML, señal SMA50/SMA200)
+    # mode = 'ml'              → ensemble + R² gate (V5)
+    #
+    # Veredicto del benchmark multi-ventana (compare_modes.py, 6×2y aleatorias 2018-24):
+    #   · ML    avg ret  -2.66%  ·  Sharpe 0.01  ·  PF 0.46  ·  0% ventanas positivas
+    #   · TREND avg ret +23.36%  ·  Sharpe 0.51  ·  PF 1.46  ·  100% ventanas positivas
+    # → TREND gana en todas las métricas. El ML no genera alpha en este universo.
+    mode          = str(body.get('mode', 'trend')).lower()
+
+    # ── Flags operativos (defaults dependen del mode) ────────────────────────
+    # Defaults para mode='trend' = variante MED del benchmark (mejor risk-adj):
+    #   · trend_reverse_exit=True  (salir en death cross — natural en trend mode)
+    #   · disable_atr_stop  =True  (los stops cortaban ganadores: +19pp avg)
+    #   · max_holding_days  =120   (Antonacci/Faber dejan correr 4-6 meses)
+    #   · target_vol        =0.20  (compromise; 0.25 da +5pp pero +5pp drawdown)
+    # Para mode='ml' los defaults se mantienen más conservadores.
+    is_trend = (mode == 'trend')
+    trend_reverse_exit  = bool(body.get('trend_reverse_exit', is_trend))
+    disable_atr_stop    = bool(body.get('disable_atr_stop',   is_trend))
+    disable_adx_filter  = bool(body.get('disable_adx_filter', False))
+    max_hold_override   = body.get('max_holding_days', 120 if is_trend else None)
+    target_vol_override = body.get('target_vol',       0.20 if is_trend else None)
+
+    # ── LLM-gate (opcional, replica el flujo del demo_bot_llm.py) ───────────
+    # Cuando está activado, antes de abrir cada nueva posición consulta al
+    # LLM (Qwen-0.5B-Instruct local). Si el LLM recomienda la dirección
+    # contraria a la del bot, la señal queda vetada. Cache mensual por
+    # (símbolo, año-mes) → reduce drásticamente el coste de cómputo.
+    use_llm     = bool(body.get('use_llm', False))
+    llm_provider = str(body.get('llm_provider', 'local'))
 
     if not start_date or not end_date:
         return jsonify({'status': 'error', 'error': 'start_date y end_date son obligatorios'}), 400
@@ -1523,19 +1967,39 @@ def paper_autonomous_backtest():
         end_dt   = today
         end_date = today.strftime('%Y-%m-%d')
 
+    # ── Filtros de régimen RE-ACTIVADOS + endurecidos ────────────────────────
+    # Iteración 1 (Tier 1): trend filter on, crash filter on. Resultado:
+    #   long+short -22%→-25%, long-only -22%→-17%. Drawdown -50%→-36%. WR 44%.
+    #   Diagnóstico: el ML tiene R²<0 en varios activos (AAPL/TSLA/SOL),
+    #   PF<1 → estamos operando ruido. Soluciones de la literatura:
+    #
+    #   Tier 2 (esta iteración):
+    #   · max_holding_days=30 (era 15) → 6× horizon de predicción, deja correr
+    #     trends (Turtle System 2: salida 20-55d). Avg hold actual 10.7d → cortamos
+    #     TPs prematuramente. PF subirá si avg_win/avg_loss llega al 2:1 diseñado.
+    #   · min_signal_strength=0.012 (era 0.005) → suelo del umbral 1.2%. Filtra
+    #     señales sub-modelo. Con threshold dinámico ya en 0.043, el suelo es
+    #     un cinturón de seguridad para periodos de baja volatilidad.
+    #   · regime_adx_min=22 (era 18) → exige tendencia clara, ADX≥22 según el
+    #     manual original de Wilder es el mínimo para considerar "trending".
+    #   · atr_stop_mult=2.0 mantenido (consistente con TP=2×SL).
     cfg = BotConfig(
         initial_capital=init_cap,
         signal_percentile=sig_pct,
         kelly_scale=kelly_sc,
         allow_short=allow_short,
         commission=commission_rate,
-        regime_use_sma200=False,
-        regime_crash_filter=False,
-        atr_stop_mult=1.5,
-        max_position_pct=0.20,
+        regime_use_sma200=True,
+        regime_crash_filter=True,
+        regime_adx_min=(0.0 if disable_adx_filter else 22.0),
+        atr_stop_mult=2.0,
+        max_position_pct=0.18,
+        target_vol=float(target_vol_override) if target_vol_override is not None else 0.15,
+        min_signal_strength=0.012,
+        max_holding_days=int(max_hold_override) if max_hold_override is not None else 30,
     )
 
-    logger.info(f"=== Autonomous multi-asset backtest: {start_date}→{end_date} cap=${init_cap:,.0f} ===")
+    logger.info(f"=== Autonomous multi-asset backtest [{mode.upper()}]: {start_date}→{end_date} cap=${init_cap:,.0f} ===")
 
     try:
         watchlist = (
@@ -1547,14 +2011,17 @@ def paper_autonomous_backtest():
 
         loader    = FinancialDataLoader()
         processor = DataProcessor()
-        # 3 años de entrenamiento (en lugar de 2) para incluir el bear market de 2022
-        # → los modelos aprenden a predecir retornos negativos en mercados bajistas
-        train_start = (start_dt - pd.DateOffset(years=3)).strftime('%Y-%m-%d')
+        # 4 años de entrenamiento (antes 3y) para cubrir múltiples regímenes:
+        # bear 2022, recuperación 2023, bull 2024 — y dar al ensemble exposición
+        # a cracks/bounces. Más datos → menos overfitting al régimen reciente.
+        train_start = (start_dt - pd.DateOffset(years=4)).strftime('%Y-%m-%d')
         dl_end      = (end_dt + pd.DateOffset(days=1)).strftime('%Y-%m-%d')
 
         # ── 1. Cargar predicciones para cada activo ───────────────────────────
-        asset_maps = {}    # symbol → {date_str → day_data_dict}
-        trained_ok = []
+        asset_maps    = {}    # symbol → {date_str → day_data_dict}
+        asset_r2      = {}    # symbol → mean_r2 OOS test (info-only, NO usar para gating)
+        asset_val_r2  = {}    # symbol → train_validation_r2 (CV pre-test, sí usable para gating)
+        trained_ok    = []
 
         for sym, atype in watchlist:
             try:
@@ -1567,6 +2034,47 @@ def paper_autonomous_backtest():
                 df = processor.clean_data(df)
                 df = processor.add_technical_indicators(df)
 
+                if mode == 'trend':
+                    # ── Modo trend-follower puro (Faber 2007 / Antonacci dual-mom) ──
+                    # No usa ML. Señal = SMA50/SMA200. Se valida SOLO con datos ≤ t,
+                    # los SMAs son rolling causales → leak-free por construcción.
+                    tdf = df[df.index >= start_dt].copy()
+                    date_map = {}
+                    for j in range(len(tdf)):
+                        idx = tdf.index[j]
+                        ds  = str(idx.date()) if hasattr(idx, 'date') else str(idx)[:10]
+                        sma50  = tdf['SMA_50'].iloc[j]   if 'SMA_50'  in tdf.columns else np.nan
+                        sma200 = tdf['SMA_200'].iloc[j]  if 'SMA_200' in tdf.columns else np.nan
+                        if pd.isna(sma50) or pd.isna(sma200) or sma200 <= 0:
+                            continue
+                        # trend_strength positivo = uptrend, negativo = downtrend
+                        trend_strength = float(sma50 / sma200 - 1.0)
+                        # Mantener mínimo 0.015 de magnitud para pasar los gates
+                        # de la fase de selección (>= 0.008). Conf 0.55-0.85 según fuerza.
+                        sign_t = 1.0 if trend_strength >= 0 else -1.0
+                        pred_t = sign_t * max(abs(trend_strength), 0.015)
+                        conf_t = 0.55 + min(abs(trend_strength) * 5.0, 0.30)
+                        date_map[ds] = {
+                            'pred':       pred_t,
+                            'conf':       conf_t,
+                            'close':      float(tdf['Close'].iloc[j]),
+                            'low':        float(tdf['Low'].iloc[j])  if 'Low'  in tdf.columns else float(tdf['Close'].iloc[j]),
+                            'high':       float(tdf['High'].iloc[j]) if 'High' in tdf.columns else float(tdf['Close'].iloc[j]),
+                            'atr':        float(tdf['ATR'].iloc[j])        if ('ATR'        in tdf.columns and not pd.isna(tdf['ATR'].iloc[j]))        else float(tdf['Close'].iloc[j]) * 0.015,
+                            'sma200':     float(sma200),
+                            'sma50':      float(sma50),
+                            'adx':        float(tdf['ADX'].iloc[j])        if ('ADX'        in tdf.columns and not pd.isna(tdf['ADX'].iloc[j]))        else None,
+                            'volatility': float(tdf['Volatility'].iloc[j]) if ('Volatility' in tdf.columns and not pd.isna(tdf['Volatility'].iloc[j])) else 0.20,
+                        }
+                    if date_map:
+                        asset_maps[sym]   = date_map
+                        asset_r2[sym]     = 1.0   # neutro: sin ML que evaluar
+                        asset_val_r2[sym] = 1.0   # always-pass del R² gate en trend mode
+                        trained_ok.append(sym)
+                        logger.info(f"  {sym}: {len(date_map)} días test · TREND-MODE (SMA50/SMA200)")
+                    continue  # siguiente activo
+
+                # ── Modo ML (default) ────────────────────────────────────────────
                 preds = _generate_bot_predictions_by_date(df, atype, start_date)
                 n_p   = len(preds['predictions'])
                 t_idx = preds['test_start_idx']
@@ -1590,31 +2098,42 @@ def paper_autonomous_backtest():
                     }
 
                 if date_map:
-                    asset_maps[sym] = date_map
+                    asset_maps[sym]   = date_map
+                    asset_r2[sym]     = float(preds.get('mean_r2', 0.0))
+                    asset_val_r2[sym] = float(preds.get('train_validation_r2', 0.0))
                     trained_ok.append(sym)
-                    logger.info(f"  {sym}: {len(date_map)} días de test")
+                    logger.info(
+                        f"  {sym}: {len(date_map)} días test · "
+                        f"val_r2={asset_val_r2[sym]:+.4f} · oos_r2={asset_r2[sym]:+.4f}"
+                    )
             except Exception as ex:
                 logger.warning(f"  Skip {sym}: {ex}")
 
         if not asset_maps:
             return jsonify({'status': 'error', 'error': 'No se pudieron cargar datos para ningún activo'}), 400
 
-        # ── Filtro de régimen: cargamos SPY SMA50 ──────────────────────────────
-        # Solo operamos LONGs cuando SPY > SMA50 (mercado alcista) y
-        # SHORTs cuando SPY < SMA50 (mercado bajista).  Si SPY no carga, se omite.
-        spy_regime = {}   # ds → True = alcista (LONG ok), False = bajista (SHORT ok)
+        # ── Filtro de régimen de mercado: SPY vs SMA_200 (Faber 2007) ──────────
+        # Antes usábamos SMA_50 → demasiados flips ruidosos al rozar la media.
+        # SMA_200 es el filtro de tendencia secular: SPY > SMA200 → mercado alcista
+        # estructural, sólo deben tomarse posiciones LONG en stocks (los SHORTs
+        # contra una tendencia secular son guaranteed bleed). En bear (SPY<SMA200)
+        # permitimos ambos sentidos pero sólo LONG si el activo tiene su propio
+        # SMA200 alcista, y SHORT si lo tiene bajista (combinación con per-asset).
+        # Crypto se rige por su propio SMA_200 individual (BTC y SPY descorrelacionados).
+        spy_regime = {}   # ds → True = SPY > SMA200 (bull), False = bear
         try:
             spy_df_raw = loader.download_data('SPY', train_start, dl_end, asset_type='stock')
             if spy_df_raw is not None and not spy_df_raw.empty:
                 if hasattr(spy_df_raw.index, 'tz') and spy_df_raw.index.tz is not None:
                     spy_df_raw.index = spy_df_raw.index.tz_localize(None)
-                spy_close  = spy_df_raw['Close']
-                spy_sma50  = spy_close.rolling(50, min_periods=30).mean()
+                spy_close   = spy_df_raw['Close']
+                spy_sma200  = spy_close.rolling(200, min_periods=100).mean()
                 for i in range(len(spy_df_raw)):
                     ds_i = str(spy_df_raw.index[i].date())
-                    if not pd.isna(spy_sma50.iloc[i]):
-                        spy_regime[ds_i] = bool(spy_close.iloc[i] >= spy_sma50.iloc[i])
-                logger.info(f"SPY regime cargado: {len(spy_regime)} días")
+                    if not pd.isna(spy_sma200.iloc[i]):
+                        spy_regime[ds_i] = bool(spy_close.iloc[i] >= spy_sma200.iloc[i])
+                bull_days = sum(1 for v in spy_regime.values() if v)
+                logger.info(f"SPY regime: {len(spy_regime)} días ({bull_days} bull, {len(spy_regime)-bull_days} bear)")
         except Exception as spy_err:
             logger.warning(f"SPY regime filter omitido: {spy_err}")
 
@@ -1637,6 +2156,89 @@ def paper_autonomous_backtest():
         raw_thr = float(np.percentile(calib_ss, cfg.signal_percentile * 100))
         threshold = max(raw_thr, cfg.min_signal_strength)
 
+        # ── LLM client + cache (trimestral por símbolo) ──────────────────────
+        # Cache trimestral (YYYY-Qn) en vez de mensual: ~3× menos llamadas en
+        # backtests largos sin perder excesivo poder de gating.
+        llm = None
+        llm_cache = {}     # (sym, 'YYYY-Qn') → recommendation_str
+        llm_stats = {'calls': 0, 'cache_hits': 0, 'errors': 0, 'vetoed': 0,
+                     'budget_skipped': 0, 'total_time': 0.0}
+        # Budget: si se supera, no se llama más al LLM y se devuelve HOLD por defecto.
+        # Esto evita que un backtest se quede colgado durante horas si hay muchos candidatos.
+        llm_budget = int(body.get('llm_budget', 60))
+        if use_llm:
+            try:
+                from utils.llm_client import LLMClient
+                llm = LLMClient(provider=llm_provider)
+                # Warm-up: una llamada barata para cargar el modelo
+                t_warm = time.time()
+                _ = llm.analyze_sentiment("Test market warmup signal.")
+                logger.info(f"LLM warm-up OK ({time.time()-t_warm:.1f}s) · budget={llm_budget}")
+            except Exception as llm_err:
+                logger.warning(f"LLM gate desactivado por error: {llm_err}")
+                llm = None
+                use_llm = False
+
+        def _quarter_key(ds: str) -> str:
+            # ds = 'YYYY-MM-DD' → 'YYYY-Q{1,2,3,4}'
+            try:
+                y, m, _ = ds.split('-')
+                q = (int(m) - 1) // 3 + 1
+                return f"{y}-Q{q}"
+            except Exception:
+                return ds[:7]
+
+        def _llm_decision(sym: str, ds: str, day: dict) -> str:
+            """Devuelve la recomendación textual del LLM con cache trimestral."""
+            if not use_llm or llm is None:
+                return ''
+            cache_k = (sym, _quarter_key(ds))
+            if cache_k in llm_cache:
+                llm_stats['cache_hits'] += 1
+                return llm_cache[cache_k]
+            # Budget: dejar pasar (HOLD) sin llamar al modelo
+            if llm_stats['calls'] >= llm_budget:
+                llm_stats['budget_skipped'] += 1
+                llm_cache[cache_k] = 'HOLD'
+                return 'HOLD'
+            close = day.get('close', 0.0)
+            sma50  = day.get('sma50')
+            sma200 = day.get('sma200')
+            atr    = day.get('atr', 0.0)
+            adx    = day.get('adx')
+            vol    = day.get('volatility', 0.0) * 100
+            pred   = day.get('pred', 0.0)
+            conf   = day.get('conf', 0.5)
+            if sma50 and sma200 and sma200 > 0:
+                ratio = sma50 / sma200 - 1
+                trend_label = 'uptrend' if ratio > 0 else 'downtrend'
+                trend_str = f"SMA50/SMA200 = {sma50/sma200:.3f} ({trend_label}, gap {ratio*100:+.1f}%)"
+            else:
+                trend_str = "tendencia indeterminada"
+            tech = (f"Precio ${close:,.2f}. {trend_str}. ATR ${atr:,.2f}. "
+                    f"ADX {f'{adx:.1f}' if adx is not None else 'n/a'}. "
+                    f"Volatilidad anualizada {vol:.1f}%.")
+            sent = "Neutral (sin feed de noticias en backtest)"
+            risk = (f"Volatilidad {vol:.1f}%. Riesgo "
+                    f"{'ALTO' if vol > 40 else 'MEDIO' if vol > 20 else 'BAJO'}.")
+            ml_sum = (f"Señal trend-follower: pred={pred:+.4f} "
+                      f"({'LONG' if pred > 0 else 'SHORT'}), confianza={conf:.2f}.")
+            t0 = time.time()
+            try:
+                mkt = llm.interpret_market_data(tech, sent, risk, ml_sum)
+                parsed = mkt.get('parsed', {}) if isinstance(mkt, dict) else {}
+                rec = str(parsed.get('recommendation', 'HOLD')).upper().strip()
+                if '|' in rec:
+                    rec = 'HOLD'
+                llm_stats['calls'] += 1
+                llm_stats['total_time'] += time.time() - t0
+            except Exception as e:
+                logger.debug(f"LLM call error {sym} {ds}: {e}")
+                llm_stats['errors'] += 1
+                rec = 'HOLD'
+            llm_cache[cache_k] = rec
+            return rec
+
         # ── 3. Simulación multi-activo ────────────────────────────────────────
         def _kelly(pred, conf, stop_pct):
             p = float(np.clip(conf, 0.15, 0.85))
@@ -1655,7 +2257,17 @@ def paper_autonomous_backtest():
         all_ss      = []
         active_syms_history = {}  # ds → [sym, ...]
 
-        for ds in all_dates:
+        _t_loop_start = time.time()
+        _log_every = max(len(all_dates) // 8, 1)  # ≈8 avisos por backtest
+
+        for _di, ds in enumerate(all_dates):
+            if use_llm and _di > 0 and _di % _log_every == 0:
+                logger.info(
+                    f"  · día {_di}/{len(all_dates)} ({ds}) "
+                    f"LLM calls={llm_stats['calls']} hits={llm_stats['cache_hits']} "
+                    f"vetoed={llm_stats['vetoed']} skip={llm_stats['budget_skipped']} "
+                    f"({time.time()-_t_loop_start:.0f}s)"
+                )
             # ── 1. Gestión de posiciones abiertas ─────────────────────────────
             for sym in list(positions.keys()):
                 position = positions[sym]
@@ -1672,34 +2284,44 @@ def paper_autonomous_backtest():
                 # teóricamente con WR > 33.3%. Dejar que los ganadores corran.
 
                 exit_p = None; exit_r = None
-                if position['type'] == 'LONG':
-                    sl_hit = day['low']  <= position['stop_loss']
-                    tp_hit = day['high'] >= position['take_profit']
-                    if sl_hit and tp_hit:
-                        # Ambos niveles tocados el mismo día: usar close vs midpoint
-                        # para estimar cuál se tocó primero (sin datos intradiarios).
-                        mid = (position['stop_loss'] + position['take_profit']) / 2
-                        if day['close'] >= mid:
-                            exit_p = position['take_profit']; exit_r = 'TAKE_PROFIT'
-                        else:
+                # ── Reverse exit (trend-follow): si la señal cambia de signo
+                #    respecto al tipo de la posición, salir al close. En trend
+                #    mode esto = death cross (LONG) o golden cross (SHORT).
+                if trend_reverse_exit:
+                    pred_t = day.get('pred', 0.0)
+                    if (position['type'] == 'LONG' and pred_t < 0) or \
+                       (position['type'] == 'SHORT' and pred_t > 0):
+                        exit_p = day['close']; exit_r = 'TREND_REVERSE'
+                # ── ATR stops (sólo si están habilitados) ────────────────────
+                if exit_p is None and not disable_atr_stop:
+                    if position['type'] == 'LONG':
+                        sl_hit = day['low']  <= position['stop_loss']
+                        tp_hit = day['high'] >= position['take_profit']
+                        if sl_hit and tp_hit:
+                            # Ambos niveles tocados el mismo día: usar close vs midpoint
+                            # para estimar cuál se tocó primero (sin datos intradiarios).
+                            mid = (position['stop_loss'] + position['take_profit']) / 2
+                            if day['close'] >= mid:
+                                exit_p = position['take_profit']; exit_r = 'TAKE_PROFIT'
+                            else:
+                                exit_p = position['stop_loss'];   exit_r = 'STOP_LOSS'
+                        elif sl_hit:
                             exit_p = position['stop_loss'];   exit_r = 'STOP_LOSS'
-                    elif sl_hit:
-                        exit_p = position['stop_loss'];   exit_r = 'STOP_LOSS'
-                    elif tp_hit:
-                        exit_p = position['take_profit']; exit_r = 'TAKE_PROFIT'
-                else:
-                    sl_hit = day['high'] >= position['stop_loss']
-                    tp_hit = day['low']  <= position['take_profit']
-                    if sl_hit and tp_hit:
-                        mid = (position['stop_loss'] + position['take_profit']) / 2
-                        if day['close'] <= mid:
+                        elif tp_hit:
                             exit_p = position['take_profit']; exit_r = 'TAKE_PROFIT'
-                        else:
+                    else:
+                        sl_hit = day['high'] >= position['stop_loss']
+                        tp_hit = day['low']  <= position['take_profit']
+                        if sl_hit and tp_hit:
+                            mid = (position['stop_loss'] + position['take_profit']) / 2
+                            if day['close'] <= mid:
+                                exit_p = position['take_profit']; exit_r = 'TAKE_PROFIT'
+                            else:
+                                exit_p = position['stop_loss'];   exit_r = 'STOP_LOSS'
+                        elif sl_hit:
                             exit_p = position['stop_loss'];   exit_r = 'STOP_LOSS'
-                    elif sl_hit:
-                        exit_p = position['stop_loss'];   exit_r = 'STOP_LOSS'
-                    elif tp_hit:
-                        exit_p = position['take_profit']; exit_r = 'TAKE_PROFIT'
+                        elif tp_hit:
+                            exit_p = position['take_profit']; exit_r = 'TAKE_PROFIT'
 
                 if exit_p is None and hold >= cfg.max_holding_days:
                     exit_p = day['close']; exit_r = 'MAX_HOLD'
@@ -1745,13 +2367,37 @@ def paper_autonomous_backtest():
                     all_ss.append(ss)
                     if ss <= threshold:
                         continue
+                    # ── Quality gate per-señal ────────────────────────────────────
+                    # Antes: pred=0.005×conf=0.85=ss=0.0042 podía pasar si threshold
+                    # caía. Ahora exigimos AMBAS componentes mínimas → la señal
+                    # tiene que tener tanto magnitud como agreement entre modelos.
+                    # 0.8% de retorno predicho × 45% confianza = filtra ruido sub-modelo.
+                    if abs(d['pred']) < 0.008 or d['conf'] < 0.45:
+                        continue
+                    # ── Gate de calidad por activo (R² CV pre-test, leak-free) ───
+                    # Activos con val_r2 << 0 → el modelo predice peor que la media
+                    # incluso dentro del training. Operarlos es operar puro ruido.
+                    # Umbral -0.30: tolera ruido razonable pero descarta los modelos
+                    # claramente rotos (ej. AAPL/TSLA/BTC en runs previos).
+                    if asset_val_r2.get(sym, 0.0) < -0.30:
+                        continue
                     direc = ('LONG' if d['pred'] > 0 else ('SHORT' if d['pred'] < 0 and cfg.allow_short else None))
                     if direc is None:
                         continue
-                    # Filtro SMA_200 (desactivado por defecto en backtest autónomo)
+                    # Filtro SMA_200 (precio vs su propia media de 200d)
                     if cfg.regime_use_sma200 and d['sma200'] is not None:
                         if direc == 'LONG'  and d['close'] < d['sma200']: continue
                         if direc == 'SHORT' and d['close'] > d['sma200']: continue
+                    # ── Confirmación de Golden Cross (SMA50 vs SMA200) ────────────
+                    # Faber + Antonacci + Turtle: la confluencia de SMA50>SMA200
+                    # (golden cross) es el filtro estructural de tendencia secular.
+                    # Solo LONG si SMA50>SMA200 (régimen alcista del activo).
+                    # Solo SHORT si SMA50<SMA200 (death cross). Esto elimina
+                    # rebounds falsos durante transiciones de régimen.
+                    if d['sma50'] is not None and d['sma200'] is not None:
+                        golden = d['sma50'] > d['sma200']
+                        if direc == 'LONG'  and not golden: continue
+                        if direc == 'SHORT' and golden:     continue
                     # Filtro ADX (tendencia mínima requerida)
                     if d['adx'] is not None and d['adx'] < cfg.regime_adx_min: continue
                     # Filtro de crash: evitar LONG tras caída >5% en 5 días
@@ -1761,13 +2407,28 @@ def paper_autonomous_backtest():
                             p5d_ago = dm[sorted_sym_dates[-6]]['close']
                             if p5d_ago > 0 and (d['close'] / p5d_ago - 1) < cfg.regime_crash_threshold:
                                 continue
-                    # Filtro de régimen SPY: solo LONG cuando mercado alcista,
-                    # solo SHORT cuando mercado bajista.
-                    if spy_regime:
+                    # Filtro de régimen SPY (sólo aplica a STOCKS — crypto es descorrelacionada).
+                    # · SPY > SMA200 (bull market): NO shorts en stocks (con tendencia secular).
+                    # · SPY < SMA200 (bear market): NO longs en stocks salvo que el propio
+                    #   activo esté arriba de SU SMA200 (eso ya lo filtra regime_use_sma200).
+                    is_stock = not sym.endswith('-USD')
+                    if spy_regime and is_stock:
                         market_up = spy_regime.get(ds)
                         if market_up is not None:
-                            if direc == 'LONG'  and not market_up: continue
-                            if direc == 'SHORT' and market_up:     continue
+                            if direc == 'SHORT' and market_up: continue   # bull → no shorts en stocks
+                            if direc == 'LONG'  and not market_up: continue  # bear → no longs en stocks
+                    # ── LLM veto (último gate, sólo si está activado) ────────────
+                    # El LLM analiza el contexto técnico y el riesgo, devolviendo
+                    # BUY/SELL/HOLD/WAIT. Si discrepa fuerte con la dirección del
+                    # bot, se descarta. HOLD/WAIT NO vetan (no añade fricción).
+                    if use_llm:
+                        rec = _llm_decision(sym, ds, d)
+                        if direc == 'LONG' and rec in ('SELL', 'STRONG_SELL', 'VENDER', 'VENTA', 'VENTA_FUERTE'):
+                            llm_stats['vetoed'] += 1
+                            continue
+                        if direc == 'SHORT' and rec in ('BUY', 'STRONG_BUY', 'COMPRAR', 'COMPRA', 'COMPRA_FUERTE'):
+                            llm_stats['vetoed'] += 1
+                            continue
                     candidates.append((ss, sym, d, direc))
 
                 # Tomar las top-N señales más fuertes
@@ -1930,6 +2591,22 @@ def paper_autonomous_backtest():
                 'signal_percentile': sig_pct,
                 'kelly_scale': kelly_sc,
                 'allow_short': allow_short,
+                'mode': mode,
+                'trend_reverse_exit': trend_reverse_exit,
+                'disable_atr_stop': disable_atr_stop,
+                'disable_adx_filter': disable_adx_filter,
+                'max_holding_days': cfg.max_holding_days,
+                'target_vol': cfg.target_vol,
+                'use_llm': use_llm,
+                'llm_provider': llm_provider if use_llm else None,
+            },
+            'llm_stats': {
+                'calls':           llm_stats['calls']           if use_llm else 0,
+                'cache_hits':      llm_stats['cache_hits']      if use_llm else 0,
+                'errors':          llm_stats['errors']          if use_llm else 0,
+                'vetoed':          llm_stats['vetoed']          if use_llm else 0,
+                'budget_skipped':  llm_stats['budget_skipped']  if use_llm else 0,
+                'avg_latency':     round(llm_stats['total_time'] / max(llm_stats['calls'], 1), 2) if use_llm else 0.0,
             },
             'performance': {
                 'initial_capital':    init_cap,
@@ -2509,8 +3186,9 @@ def paper_live_analysis():
 
 # ──────────────────────────────────────────────
 if __name__ == '__main__':
+    _port = int(os.environ.get('PORT', 5000))
     print("\n" + "=" * 60)
     print("  FINANCIAL AI - ML + LLM Hybrid Prediction System")
-    print("  Open http://localhost:5000 in your browser")
+    print(f"  Open http://localhost:{_port} in your browser")
     print("=" * 60 + "\n")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=_port, debug=False)

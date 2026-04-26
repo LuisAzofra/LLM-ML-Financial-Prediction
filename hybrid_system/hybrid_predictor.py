@@ -206,17 +206,30 @@ class HybridPredictor:
         if include_dl:
             if self.dl_ensemble:
                 logger.info("\n🧠 Prediciendo con ensemble DL...")
-                
-                # Preparar secuencia
+
+                # Preparar secuencia: el scaler debe haberse ajustado sobre el histórico
+                # de entrenamiento (accesible vía self.dl_ensemble.scaler). Ajustar
+                # un nuevo MinMaxScaler sobre el último segmento introducía fuga y
+                # degradaba la predicción — ahora reutilizamos el scaler entrenado.
                 seq_length = self.dl_ensemble.seq_length
                 latest_sequence = df[feature_cols].iloc[-seq_length:].values
-                
-                # Normalizar
-                from sklearn.preprocessing import MinMaxScaler
-                scaler = MinMaxScaler()
-                latest_scaled = scaler.fit_transform(latest_sequence)
+
+                scaler = getattr(self.dl_ensemble, 'scaler', None)
+                if scaler is not None:
+                    try:
+                        latest_scaled = scaler.transform(latest_sequence)
+                    except Exception:
+                        # Fallback seguro: usar todo el histórico disponible para ajustar
+                        from sklearn.preprocessing import MinMaxScaler
+                        fallback = MinMaxScaler().fit(df[feature_cols].values)
+                        latest_scaled = fallback.transform(latest_sequence)
+                else:
+                    from sklearn.preprocessing import MinMaxScaler
+                    fallback = MinMaxScaler().fit(df[feature_cols].values)
+                    latest_scaled = fallback.transform(latest_sequence)
+
                 X_pred = np.array([latest_scaled])
-                
+
                 pred = self.dl_ensemble.predict(X_pred)[0]
                 predictions['dl_ensemble'] = {
                     'predicted_price': pred,

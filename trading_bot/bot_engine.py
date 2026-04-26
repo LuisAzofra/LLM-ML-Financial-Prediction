@@ -25,12 +25,16 @@ logger = logging.getLogger(__name__)
 class BotConfig:
     """Parametros de configuracion del bot de trading."""
     initial_capital: float = 100_000.0
-    # Percentil minimo de fuerza de señal para entrar (0.70 = top 30% señales)
-    signal_percentile: float = 0.70
-    # Maximo % del capital por posicion — reducido de 0.30 para limitar drawdown
-    max_position_pct: float = 0.15
-    # Fraccion de Kelly a usar — reducido de 0.30 para ser más conservador
-    kelly_scale: float = 0.20
+    # Percentil minimo de fuerza de señal para entrar (0.65 = top 35% señales)
+    # Antes era 0.70 (top 30%); hemos bajado porque el accuracy-gate y los filtros
+    # de régimen ya filtran calidad, y el cuello de botella eran "pocas entradas".
+    signal_percentile: float = 0.65
+    # Maximo % del capital por posicion
+    max_position_pct: float = 0.18
+    # Fraccion de Kelly a usar — subido de 0.20 a 0.28 porque con b_min=0.35 y
+    # confianzas calibradas el Kelly crudo suele ser pequeño; necesitamos
+    # convertir señales reales en exposición real sin volver imprudente.
+    kelly_scale: float = 0.28
     # Costes de transaccion
     commission: float = 0.001    # 0.1% por lado
     slippage: float = 0.0005     # 0.05% por lado
@@ -234,6 +238,7 @@ class AutonomousTradingBot:
                     # Solo operar en dirección de la tendencia (SMA_200 + SMA_50)
                     # y solo cuando el mercado tiene tendencia clara (ADX)
                     regime_ok = True
+                    sma50_penalty = 1.0  # reseteado en cada iteración
                     if cfg.regime_use_sma200 and 'SMA_200' in test_df.columns:
                         sma200 = test_df['SMA_200'].iloc[i]
                         if not pd.isna(sma200):
@@ -242,28 +247,42 @@ class AutonomousTradingBot:
                             if direction == 'SHORT' and current_price > sma200:
                                 regime_ok = False  # corto en tendencia alcista
 
-                    # SMA_50: filtro de tendencia intermedia (más reactivo que SMA_200)
-                    if regime_ok and 'SMA_50' in test_df.columns:
+                    # SMA_50 ya no actúa como filtro duro (era redundante con SMA_200
+                    # y bloqueaba las mejores entradas de mean-reversion intra-tendencia).
+                    # En cambio, si el precio contradice fuertemente la SMA_50 en la
+                    # misma dirección que la señal, reducimos tamaño (filtro suave).
+                    if 'SMA_50' in test_df.columns:
                         sma50 = test_df['SMA_50'].iloc[i]
                         if not pd.isna(sma50):
                             if direction == 'LONG'  and current_price < sma50:
-                                regime_ok = False  # tendencia intermedia bajista
+                                sma50_penalty = 0.70  # 30% menos tamaño
                             if direction == 'SHORT' and current_price > sma50:
-                                regime_ok = False  # tendencia intermedia alcista
+                                sma50_penalty = 0.70
 
                     if regime_ok and 'ADX' in test_df.columns:
                         adx_val = test_df['ADX'].iloc[i]
                         if not pd.isna(adx_val) and float(adx_val) < cfg.regime_adx_min:
                             regime_ok = False  # mercado sin tendencia (choppy)
 
-                    # ── Filtro de crash: evita entradas LONG en caídas bruscas ──
-                    # Si el activo cayó >5% en los últimos 5 días, el mercado está
-                    # en modo pánico — no entrar LONG (Red Team: crash filter)
+                    # ── Filtro de crash con excepción oversold ─────────────────
+                    # Bloqueamos LONG cuando el activo cae >5% en 5 días (evita
+                    # atrapar cuchillos), PERO permitimos la entrada si está
+                    # claramente sobrevendido (RSI<30) y la señal es fuerte.
+                    # Esto captura rebotes estadísticos sin comprometer en tendencia bajista.
                     if regime_ok and cfg.regime_crash_filter and direction == 'LONG' and i >= 5:
                         price_5d_ago = float(test_df['Close'].iloc[i - 5])
                         roll_5d = (current_price / price_5d_ago - 1) if price_5d_ago > 0 else 0.0
                         if roll_5d < cfg.regime_crash_threshold:
-                            regime_ok = False  # caída en pánico — esperar estabilización
+                            rsi_val = None
+                            if 'RSI' in test_df.columns:
+                                _r = test_df['RSI'].iloc[i]
+                                if not pd.isna(_r):
+                                    rsi_val = float(_r)
+                            # Excepción: RSI muy bajo + señal fuerte → mean-reversion bounce
+                            strong_signal = ss > (threshold * 1.3)
+                            oversold_bounce = rsi_val is not None and rsi_val < 30 and strong_signal
+                            if not oversold_bounce:
+                                regime_ok = False  # caída en pánico — esperar estabilización
 
                     if not regime_ok:
                         # Actualizar equity y seguir al siguiente día
@@ -290,7 +309,7 @@ class AutonomousTradingBot:
                     vol_scalar = float(np.clip(cfg.target_vol / max(current_vol, 0.05), 0.3, 2.0))
 
                     size_pct = min(
-                        kelly * relative_strength * cfg.kelly_scale * vol_scalar,
+                        kelly * relative_strength * cfg.kelly_scale * vol_scalar * sma50_penalty,
                         cfg.max_position_pct
                     )
                     # Red Team Finding 6: NO forzar mínimo — si Kelly=0, no apostar.
@@ -382,14 +401,14 @@ class AutonomousTradingBot:
         stop_loss_pct debe ser la distancia ATR-based al stop, no un 1% fijo.
         Esto calibra correctamente cuanto capital arriesgamos por unidad ganada.
         """
-        p = float(np.clip(confidence, 0.15, 0.85))
+        p = float(np.clip(confidence, 0.15, 0.90))
         # Risk = distancia real al stop-loss (ATR × multiplicador / precio_entrada)
         risk = max(float(stop_loss_pct), 0.005)  # minimo 0.5% para evitar b → ∞
         # b = cuanto ganamos por unidad arriesgada (reward/risk ratio)
-        # TP se fija a 2×pred → b = 2×|pred|/risk. Mínimo b = 0.5 para que
-        # confianza moderada (≥0.67) genere Kelly > 0 y posiciones ejecutables.
-        # Con b_min=0.1 anterior: necesitaba conf > 0.909 → nunca operaba.
-        b = max(2 * abs(predicted_return) / risk, 0.5)
+        # TP se fija a 2× distancia stop → b real ≥ 2.0. Usamos max(2, 2×|pred|/risk)
+        # como estimación conservadora. Antes b_min=0.5 exigía conf>0.67 para Kelly>0;
+        # con b_min=2.0 (consistente con TP=2×stop) ya conf≥0.34 produce Kelly positivo.
+        b = max(2 * abs(predicted_return) / risk, 2.0)
         q = 1.0 - p
         kelly = (p * b - q) / b
         return float(np.clip(kelly, 0.0, 1.0))

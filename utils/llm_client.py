@@ -5,6 +5,7 @@ Soporta Ollama (local) y Hugging Face Inference API (gratuita)
 import requests
 import json
 import logging
+import os
 from typing import Optional, Dict, Any
 import time
 
@@ -38,14 +39,27 @@ class LLMClient:
         elif self.provider == "huggingface":
             self.api_token = None  # Se puede usar sin token con rate limits
             self.base_url = "https://api-inference.huggingface.co/models"
+        elif self.provider == "local":
+            # Inferencia local con transformers — sin Ollama ni HF remoto.
+            # Carga perezosa: sólo importa torch/transformers al primer generate.
+            self._local_pipeline = None
+            self._local_tokenizer = None
         else:
             raise ValueError(f"Proveedor no soportado: {provider}")
     
     def _get_default_model(self) -> str:
-        """Retorna el modelo por defecto según el proveedor"""
+        """Retorna el modelo por defecto según el proveedor.
+
+        El modelo local es configurable por env var TFG_LOCAL_LLM. Para
+        máquinas con swap muy saturado se recomienda SmolLM2-360M
+        (~700MB en disco, ~350MB en bfloat16). Qwen2.5-0.5B (default) requiere
+        ~600MB en bfloat16. Cambiar a SmolLM2-135M (~120MB bfloat16) si la RAM
+        es aún más ajustada.
+        """
         defaults = {
             "ollama": "qwen2.5",
-            "huggingface": "mistralai/Mistral-7B-Instruct-v0.2"
+            "huggingface": "mistralai/Mistral-7B-Instruct-v0.2",
+            "local": os.environ.get('TFG_LOCAL_LLM', "Qwen/Qwen2.5-0.5B-Instruct"),
         }
         return defaults.get(self.provider, "qwen2.5")
     
@@ -148,6 +162,8 @@ class LLMClient:
         
         if self.provider == "ollama":
             result = self._generate_ollama(prompt, system_prompt, temperature, max_tokens)
+        elif self.provider == "local":
+            result = self._generate_local(prompt, system_prompt, temperature, max_tokens)
         else:
             result = self._generate_huggingface(prompt, system_prompt, temperature, max_tokens)
         
@@ -200,6 +216,91 @@ class LLMClient:
                 'error': str(e)
             }
     
+    # ── Cache a nivel de módulo ──────────────────────────────────────────
+    # Compartido entre TODAS las instancias de LLMClient para que varios
+    # agentes (SentimentAnalyst, PortfolioManager) no carguen el mismo
+    # modelo varias veces en memoria — crítico en CPU con RAM ajustada.
+    _LOCAL_PIPELINE_CACHE: Dict[str, Any] = {}
+
+    def _init_local_pipeline(self):
+        """Carga perezosa del modelo local (transformers, CPU) con cache global."""
+        if self._local_pipeline is not None:
+            return
+        cached = LLMClient._LOCAL_PIPELINE_CACHE.get(self.model)
+        if cached is not None:
+            self._local_tokenizer, self._local_pipeline = cached
+            return
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        logger.info(f"⏳ Cargando modelo local '{self.model}' (primera vez descarga ~1GB)…")
+        tok = AutoTokenizer.from_pretrained(self.model)
+        # bfloat16 en CPU: ~500MB para Qwen-0.5B (vs ~1GB en fp32) — evita OOM
+        # en macOS cuando hay presión de swap. bfloat16 está soportado en torch≥1.12
+        # y la pérdida de calidad para JSON structured output es despreciable.
+        model = AutoModelForCausalLM.from_pretrained(
+            self.model,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+        )
+        model.eval()
+        self._local_tokenizer = tok
+        self._local_pipeline = model
+        LLMClient._LOCAL_PIPELINE_CACHE[self.model] = (tok, model)
+        logger.info(f"✅ Modelo local cargado: {self.model} (bfloat16, cache global)")
+
+    def _generate_local(self, prompt: str, system_prompt: Optional[str],
+                        temperature: float, max_tokens: int) -> Dict[str, Any]:
+        """Inferencia local usando transformers (CPU). No requiere Ollama ni API."""
+        try:
+            self._init_local_pipeline()
+            import torch
+            tok = self._local_tokenizer
+            model = self._local_pipeline
+
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+            # Qwen y la mayoría de chat models exponen un chat template.
+            if hasattr(tok, 'apply_chat_template') and tok.chat_template:
+                inputs_text = tok.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            else:
+                inputs_text = (
+                    (f"[SYSTEM]\n{system_prompt}\n\n" if system_prompt else "")
+                    + f"[USER]\n{prompt}\n\n[ASSISTANT]\n"
+                )
+
+            inputs = tok(inputs_text, return_tensors='pt', truncation=True, max_length=3072)
+            with torch.no_grad():
+                output_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=min(max_tokens, 512),
+                    do_sample=(temperature > 0.01),
+                    temperature=max(temperature, 0.01),
+                    top_p=0.9,
+                    pad_token_id=tok.eos_token_id,
+                    repetition_penalty=1.1,
+                )
+            gen_tokens = output_ids[0][inputs['input_ids'].shape[1]:]
+            text = tok.decode(gen_tokens, skip_special_tokens=True).strip()
+
+            return {
+                'text': text,
+                'tokens_used': int(gen_tokens.shape[0]),
+                'model': self.model,
+                'provider': 'local',
+            }
+        except Exception as e:
+            logger.error(f"❌ Error en LLM local: {e}")
+            return {
+                'text': f"[ERROR: {e}]",
+                'tokens_used': 0,
+                'error': str(e),
+            }
+
     def _generate_huggingface(self, prompt: str, system_prompt: Optional[str],
                               temperature: float, max_tokens: int) -> Dict[str, Any]:
         """Genera usando Hugging Face Inference API (gratuita)"""
@@ -275,7 +376,12 @@ class LLMClient:
             "2. The 'score' MUST be a float between -1.0 (extremely bearish) and 1.0 (extremely bullish).\n"
             "3. Be conservative: only assign extreme scores (|score| > 0.7) for clearly decisive news.\n"
             "4. Distinguish between short-term sentiment (next 1-5 days) and structural factors.\n"
-            "5. Base your analysis strictly on the provided text — do not assume facts not stated.\n\n"
+            "5. Base your analysis strictly on the provided text — do not assume facts not stated.\n"
+            "6. 'confidence' must reflect your actual certainty: if the news is generic, aged, or "
+            "irrelevant to the 5-day horizon, confidence MUST be ≤ 0.35. Do NOT inflate confidence "
+            "just because you produced a score. A well-calibrated 0.25 is better than a fake 0.70.\n"
+            "7. If the news mix is mostly noise (ads, generic market recaps, unrelated filings), "
+            "set sentiment='neutral' and score=0.0 with confidence ≤ 0.20.\n\n"
             'Required JSON format: {"sentiment":"bullish|bearish|neutral","score":<float>,'
             '"confidence":<float>,"key_points":["..."],"reasoning":"<max 60 words>",'
             '"time_sensitivity":"immediate|short_term|medium_term"}'
@@ -341,17 +447,21 @@ class LLMClient:
             "Your task is to synthesize technical analysis, sentiment, risk assessment, and "
             "quantitative ML model predictions into a single investment decision.\n\n"
             "CRITICAL DECISION RULES (follow in strict order of priority):\n"
-            "1. VOLATILITY OVERRIDE: If vol_regime > 1.5 (high volatility) OR vol_percentile > 0.8, "
-            "cap confidence at 0.5 and use small/none position sizes. Markets in extreme vol regimes "
-            "invalidate short-term ML signals.\n"
-            "2. BEAR MARKET RULE: If bull_market=0 (price below 200-day SMA), do NOT recommend BUY "
-            "unless there is very strong positive evidence from ALL other signals.\n"
-            "3. MODEL AGREEMENT: If ML models disagree on direction (shown in ML section), "
-            "default to HOLD regardless of individual signals.\n"
-            "4. RISK VETO: If risk assessment recommends RECHAZAR, override any bullish signal "
-            "with HOLD.\n"
-            "5. SENTIMENT CONTRARIAN: Extreme fear (score < -0.7) can be a buy signal. "
-            "Extreme greed (score > 0.7) can be a sell signal.\n\n"
+            "1. ML IS THE PRIMARY SIGNAL. When the ML ensemble has confidence ≥ 0.60 AND >70% of "
+            "individual models agree on direction, FOLLOW the ML recommendation — do not default "
+            "to HOLD just because sentiment is mixed. ML has a quantitative edge you do not.\n"
+            "2. VOLATILITY OVERRIDE: If volatility is extreme (> 60% annualized) OR vol_percentile > 0.9, "
+            "downgrade position_size to 'small' but do NOT veto a high-confidence ML signal.\n"
+            "3. BEAR MARKET NUANCE: Below 200-day SMA, a BUY is still valid when ML confidence ≥ 0.65 AND "
+            "oversold conditions (RSI < 30 or extreme fear sentiment) align. Otherwise prefer HOLD.\n"
+            "4. MODEL DISAGREEMENT: Only default to HOLD when models are truly split (≤55% agreement). "
+            "If 70%+ agree and the ML confidence ≥ 0.55, trust the ML vote.\n"
+            "5. RISK VETO: If risk assessment says RECHAZAR, you may still allow a SMALL position when "
+            "the ML confidence is ≥ 0.70 and direction matches the broader trend (SMA 200).\n"
+            "6. SENTIMENT CONTRARIAN: Extreme fear (score < -0.7) is a BUY filter when ML also bullish. "
+            "Extreme greed (score > 0.7) is a SELL/trim filter when ML bearish.\n"
+            "7. AVOID HOLD BIAS: If you recommend HOLD, provide a SPECIFIC reason — 'uncertainty' alone "
+            "is not enough. A well-calibrated manager takes calculated bets when the ML edge is real.\n\n"
             "CRITICAL: Output ONLY valid JSON — no markdown, no preamble.\n"
             'Required JSON: {"recommendation":"BUY|SELL|HOLD|WAIT","confidence":<0-1>,'
             '"position_size":"small|medium|large|none","reasoning":"<max 150 words>",'

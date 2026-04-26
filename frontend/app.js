@@ -1995,8 +1995,15 @@ async function hbtRun() {
       body: JSON.stringify({
         start_date: startDate, end_date: endDate,
         initial_capital: capital, allow_short: allowShort,
-        signal_percentile: 0.70, kelly_scale: 0.30,
+        // 0.82 (top 18% señales) + Kelly fraccionado 0.22:
+        // antes 0.70/0.30 → demasiadas entradas con conviction baja → -22%.
+        // Literatura (Faber/Antonacci/Kelly fraccional 0.25×): menos trades,
+        // mejor seleccionados → mayor profit factor y menor drawdown.
+        signal_percentile: 0.82, kelly_scale: 0.22,
         commission_rate: commissionRate,
+        // 'mode' no enviado → backend usa default = 'trend' (ganador del
+        // benchmark multi-ventana: avg +23% vs ML −2.66%, 100% ventanas
+        // positivas vs 0%, Sharpe 0.51 vs 0.01).
       }),
     });
     const data = await res.json();
