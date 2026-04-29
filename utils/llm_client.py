@@ -44,6 +44,17 @@ class LLMClient:
             # Carga perezosa: sólo importa torch/transformers al primer generate.
             self._local_pipeline = None
             self._local_tokenizer = None
+        elif self.provider == "local-gguf":
+            # Tier 3.4: inferencia local con llama-cpp-python sobre Qwen2.5-1.5B
+            # cuantizado a 4-bit GGUF (~1 GB en disco/RAM). Mejor instruction-following
+            # que Qwen2.5-0.5B bfloat16 con footprint similar y sin OOM en mac arm64.
+            # Modelo y fichero configurables vía TFG_LOCAL_GGUF_FILE.
+            self._gguf_llm = None
+            self._gguf_repo = self.model
+            self._gguf_filename = os.environ.get(
+                'TFG_LOCAL_GGUF_FILE',
+                'qwen2.5-1.5b-instruct-q4_k_m.gguf',
+            )
         else:
             raise ValueError(f"Proveedor no soportado: {provider}")
     
@@ -60,6 +71,9 @@ class LLMClient:
             "ollama": "qwen2.5",
             "huggingface": "mistralai/Mistral-7B-Instruct-v0.2",
             "local": os.environ.get('TFG_LOCAL_LLM', "Qwen/Qwen2.5-0.5B-Instruct"),
+            "local-gguf": os.environ.get(
+                'TFG_LOCAL_GGUF_LLM', "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+            ),
         }
         return defaults.get(self.provider, "qwen2.5")
     
@@ -164,6 +178,8 @@ class LLMClient:
             result = self._generate_ollama(prompt, system_prompt, temperature, max_tokens)
         elif self.provider == "local":
             result = self._generate_local(prompt, system_prompt, temperature, max_tokens)
+        elif self.provider == "local-gguf":
+            result = self._generate_local_gguf(prompt, system_prompt, temperature, max_tokens)
         else:
             result = self._generate_huggingface(prompt, system_prompt, temperature, max_tokens)
         
@@ -221,6 +237,7 @@ class LLMClient:
     # agentes (SentimentAnalyst, PortfolioManager) no carguen el mismo
     # modelo varias veces en memoria — crítico en CPU con RAM ajustada.
     _LOCAL_PIPELINE_CACHE: Dict[str, Any] = {}
+    _GGUF_PIPELINE_CACHE: Dict[str, Any] = {}
 
     def _init_local_pipeline(self):
         """Carga perezosa del modelo local (transformers, CPU) con cache global."""
@@ -295,6 +312,82 @@ class LLMClient:
             }
         except Exception as e:
             logger.error(f"❌ Error en LLM local: {e}")
+            return {
+                'text': f"[ERROR: {e}]",
+                'tokens_used': 0,
+                'error': str(e),
+            }
+
+    # ── Tier 3.4: provider local-gguf (Qwen2.5-1.5B 4-bit GGUF) ───────────
+    def _init_local_gguf_pipeline(self):
+        """Carga perezosa del modelo GGUF (llama.cpp) con cache global."""
+        if self._gguf_llm is not None:
+            return
+        cache_key = f"{self._gguf_repo}:{self._gguf_filename}"
+        cached = LLMClient._GGUF_PIPELINE_CACHE.get(cache_key)
+        if cached is not None:
+            self._gguf_llm = cached
+            return
+        from llama_cpp import Llama
+        from huggingface_hub import hf_hub_download
+        logger.info(
+            f"⏳ Descargando/cargando GGUF '{self._gguf_repo}/{self._gguf_filename}'…"
+        )
+        gguf_path = hf_hub_download(
+            repo_id=self._gguf_repo, filename=self._gguf_filename
+        )
+        # n_ctx=4096 cubre prompts del bull/bear/judge (Tier 2.3) sin truncar.
+        # n_threads=os.cpu_count() en macOS arm64 ≈ 8-10. n_gpu_layers=-1 usa
+        # Metal cuando llama-cpp-python se compiló con CMAKE_ARGS=-DLLAMA_METAL=on;
+        # si no, llama.cpp ignora silenciosamente y corre todo en CPU.
+        llm = Llama(
+            model_path=gguf_path,
+            n_ctx=4096,
+            n_threads=max(1, (os.cpu_count() or 4) - 1),
+            n_gpu_layers=-1,
+            verbose=False,
+            seed=42,
+        )
+        self._gguf_llm = llm
+        LLMClient._GGUF_PIPELINE_CACHE[cache_key] = llm
+        logger.info(
+            f"✅ Modelo GGUF cargado: {self._gguf_repo}/{self._gguf_filename}"
+        )
+
+    def _generate_local_gguf(self, prompt: str, system_prompt: Optional[str],
+                             temperature: float, max_tokens: int) -> Dict[str, Any]:
+        """Inferencia local con llama-cpp-python (GGUF 4-bit). No requiere torch."""
+        try:
+            self._init_local_gguf_pipeline()
+            llm = self._gguf_llm
+
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+            # create_chat_completion aplica el chat template del modelo (Qwen
+            # ChatML) automáticamente, igual que apply_chat_template de
+            # transformers — no hace falta formatear el prompt a mano.
+            out = llm.create_chat_completion(
+                messages=messages,
+                temperature=max(temperature, 0.01),
+                top_p=0.9,
+                max_tokens=min(max_tokens, 512),
+                repeat_penalty=1.1,
+            )
+            choice = (out.get('choices') or [{}])[0]
+            text = (choice.get('message') or {}).get('content', '').strip()
+            usage = out.get('usage') or {}
+
+            return {
+                'text': text,
+                'tokens_used': int(usage.get('completion_tokens', 0)),
+                'model': self.model,
+                'provider': 'local-gguf',
+            }
+        except Exception as e:
+            logger.error(f"❌ Error en LLM local-gguf: {e}")
             return {
                 'text': f"[ERROR: {e}]",
                 'tokens_used': 0,

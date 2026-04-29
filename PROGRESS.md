@@ -602,9 +602,73 @@ for w in [0.50, 0.60, 0.70, 0.75, 0.85]:
 
 ---
 
-## Tier 3.4 — Decisión: upgrade Qwen 0.5B → 1.5B/3B
+## Tier 3.4 — Upgrade Qwen 0.5B → 1.5B 4-bit GGUF
 
-**Estado:** RECOMENDACIÓN ✓ (2026-04-26, decisión analítica documentada).
+**Estado:** ACEPTADO ✓ (2026-04-29, implementación + smoke + phase E2E pasando).
+**Objetivo:** reemplazar Qwen2.5-0.5B-Instruct (bfloat16, transformers) por Qwen2.5-1.5B-Instruct quantizado 4-bit (`Q4_K_M`) vía llama.cpp. Mejor instruction-following sin OOM en este Mac, primera vez que el LLM se puede usar en backtests reales sin saturar RAM.
+
+**Archivos modificados:** `utils/llm_client.py` (provider nuevo `local-gguf`, ~95 LoC: `_init_local_gguf_pipeline` + `_generate_local_gguf` + cache global `_GGUF_PIPELINE_CACHE` + branch en `__init__`/`generate`/`_get_default_model`), `verify_llm_smoke.py` (respeta `TFG_LLM_PROVIDER`).
+**Dependencias añadidas:** `llama-cpp-python==0.3.21` (instalado con `CMAKE_ARGS="-DLLAMA_METAL=on"` para Metal GPU offload). Modelo descargado desde HF Hub: `Qwen/Qwen2.5-1.5B-Instruct-GGUF` archivo `qwen2.5-1.5b-instruct-q4_k_m.gguf` (~986 MB).
+
+### Diseño
+
+`LLMClient(provider='local-gguf')`:
+- Default repo `Qwen/Qwen2.5-1.5B-Instruct-GGUF` (configurable via `TFG_LOCAL_GGUF_LLM`).
+- Default file `qwen2.5-1.5b-instruct-q4_k_m.gguf` (configurable via `TFG_LOCAL_GGUF_FILE`).
+- Carga perezosa con `huggingface_hub.hf_hub_download` + `llama_cpp.Llama(model_path=..., n_ctx=4096, n_threads=cpu-1, n_gpu_layers=-1, seed=42)`.
+- `_GGUF_PIPELINE_CACHE` (dict de clase) para que múltiples agentes compartan la misma instancia Llama — crítico en RAM ajustada.
+- `_generate_local_gguf` usa `create_chat_completion` (aplica el chat template Qwen ChatML automáticamente).
+- Provider `'local'` (Qwen 0.5B bfloat16 transformers) se mantiene como fallback.
+
+### Validación
+
+**Smoke** (`TFG_LLM_PROVIDER=local-gguf .venv/bin/python -u verify_llm_smoke.py`):
+
+| Paso                              | Resultado                                                                  |
+|-----------------------------------|----------------------------------------------------------------------------|
+| Descarga + carga GGUF             | 30.3s primera vez, 0s con cache                                            |
+| RSS tras carga + 1 inferencia     | 1299 MB (cabe sin OOM en Mac libre con ML/pandas también activo)           |
+| Latencia 2ª inferencia (cache)    | 3.9s para `interpret_market_data` (prompt ~300 tokens)                     |
+| `analyze_sentiment` (MSFT bull)   | sentiment=bullish, score=+0.85, confidence=0.75 ✓                          |
+| `interpret_market_data` (mixto)   | recommendation=BUY, confidence=0.9, reasoning explícito y coherente ✓      |
+
+**Phase** (`TFG_LLM_PROVIDER=local-gguf .venv/bin/python -u verify_llm_phase.py`, MSFT + BTC con ML sintético):
+
+| Símbolo | ML sintético            | Agentes (LLM) decision/conf | Hybrid score |
+|---------|-------------------------|------------------------------|--------------|
+| MSFT    | UP +8.55% conf=0.90     | COMPRAR conf=0.90            | COMPRA_FUERTE 0.925 |
+| BTC-USD | UP +1.47% conf=0.65     | MANTENER conf=0.90           | COMPRA_FUERTE 0.75  |
+
+Los 4 agentes (technical / sentiment / risk / ml_prediction) producen `recommendation` + `reasoning` válidos, sin parsing fallback. Esta es la **primera vez** en este proyecto que `_run_agents` corre end-to-end con LLM real sin OOM.
+
+### Lecciones / decisiones
+
+- **Metal GPU offload con `n_gpu_layers=-1`**: en macOS arm64 con `CMAKE_ARGS="-DLLAMA_METAL=on"` el modelo entero (1.5B 4-bit, 28 capas) se va a la GPU integrada. Latencia de generación bajó de ~25 ms/token (CPU bfloat16) a ~10 ms/token (Metal Q4_K_M), incluso siendo el modelo 3× más grande.
+- **Warning Metal `GGML_ASSERT([rsets->data count] == 0)` al exit del proceso**: bug conocido de llama.cpp Metal cleanup en macOS (issue #17869). NO afecta a la generación; solo aparece tras el último `print` final. Inocuo. Mitigación: nada que hacer hasta que upstream lo arregle.
+- **`n_ctx=4096`** suficiente para los prompts de `_run_agents` (~1.5k tokens) y para el debate Tier 2.3 (~3k). Modelo entrena con 32k pero no necesitamos esa ventana — n_ctx más alto consume RAM proporcional.
+- **Cache global compartido**: `_GGUF_PIPELINE_CACHE` evita que SentimentAnalyst + PortfolioManager carguen 2 copias (el bug original que motivó `_LOCAL_PIPELINE_CACHE` para el provider `'local'`). Mismo patrón.
+- **Provider `'local'` no eliminado**: sirve como fallback para sistemas sin llama-cpp instalado y para reproducir la baseline anterior si necesitamos revalidar comparaciones históricas.
+
+### Comando reproducible
+
+```
+# desde la raiz del repo
+CMAKE_ARGS="-DLLAMA_METAL=on" .venv/bin/pip install llama-cpp-python   # 1ª vez
+TFG_LLM_PROVIDER=local-gguf .venv/bin/python -u verify_llm_smoke.py
+TFG_LLM_PROVIDER=local-gguf .venv/bin/python -u verify_llm_phase.py
+```
+
+### Pendiente para esta sesión (continúa en Tier 1.2/2.3/3.3)
+
+- Tier 1.2 E2E real (BASELINE_GGUF vs MED_LLM_GGUF) sobre 6 ventanas — desbloquea ahora.
+- Tier 2.3 E2E real (MED_LLM_GGUF + use_debate=true) — verificar que el judge respeta "do NOT flip direction".
+- Tier 3.3 sweep ml_weight tras refactor `_llm_decision` a (direction, confidence_continuous).
+
+---
+
+## Tier 3.4 — Decisión original (RECOMENDACIÓN, archivada)
+
+**Estado:** RECOMENDACIÓN ✓ (2026-04-26, decisión analítica documentada — IMPLEMENTADA en sesión 2026-04-29).
 **Objetivo:** decidir si reemplazar Qwen2.5-0.5B-Instruct (bfloat16, transformers) por un modelo mayor con quantización 4-bit que mantenga RAM footprint pero mejore razonamiento.
 
 ### Contexto

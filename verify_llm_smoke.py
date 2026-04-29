@@ -1,12 +1,13 @@
 """
-Smoke test mínimo del proveedor LLM local (Qwen2.5-0.5B bfloat16).
+Smoke test mínimo del proveedor LLM local.
 
 Prueba sólo el camino LLM aislado — sin pandas/yfinance/ML/agents.
-Objetivo: demostrar que la ruta `LLMClient(provider='local')` funciona en esta
+Objetivo: demostrar que la ruta `LLMClient(provider=...)` funciona en esta
 máquina sin depender de memoria adicional del resto de la pipeline.
 
 Uso:
-    .venv/bin/python -u verify_llm_smoke.py
+    .venv/bin/python -u verify_llm_smoke.py                    # default 'local' (Qwen2.5-0.5B bfloat16)
+    TFG_LLM_PROVIDER=local-gguf .venv/bin/python -u verify_llm_smoke.py   # Tier 3.4 (Qwen2.5-1.5B Q4_K_M)
 """
 import os, sys, time, resource
 import builtins as _b
@@ -23,12 +24,14 @@ from utils.llm_client import LLMClient
 def rss_mb():
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
 
+PROVIDER = os.environ.get('TFG_LLM_PROVIDER', 'local')
+
 print("=" * 78)
-print("SMOKE TEST — LLMClient(provider='local') · Qwen2.5-0.5B bfloat16")
+print(f"SMOKE TEST — LLMClient(provider='{PROVIDER}')")
 print("=" * 78)
 print(f"RSS inicial: {rss_mb():.1f} MB")
 
-cli = LLMClient(provider='local')
+cli = LLMClient(provider=PROVIDER)
 print(f"Model id:    {cli.model}")
 
 # Inferencia 1: sentiment analysis
