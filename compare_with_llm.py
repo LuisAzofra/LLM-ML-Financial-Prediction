@@ -49,14 +49,17 @@ DELTA_DAYS = (LATEST - EARLIEST).days
 MED_BASE = {'trend_reverse_exit': True, 'disable_atr_stop': True,
             'max_holding_days': 120, 'target_vol': 0.20}
 
+LLM_PROVIDER = os.environ.get('TFG_LLM_PROVIDER', 'local-gguf')
+LLM_BASE = {'use_llm': True, 'llm_provider': LLM_PROVIDER}
+
 VARIANTS = [
-    ('BASELINE_LLM', {'use_llm': True}),
-    ('MED_LLM',      {**MED_BASE, 'use_llm': True}),
-    ('BIG_VOL_LLM',  {**MED_BASE, 'target_vol': 0.25, 'use_llm': True}),
-    ('SAFE_LLM',     {'trend_reverse_exit': True, 'max_holding_days': 120,
-                      'target_vol': 0.25, 'use_llm': True}),
+    ('BASELINE_GGUF', {**LLM_BASE}),
+    ('MED_LLM_GGUF',  {**MED_BASE, **LLM_BASE}),
+    ('BIG_VOL_GGUF',  {**MED_BASE, 'target_vol': 0.25, **LLM_BASE}),
+    ('SAFE_GGUF',     {'trend_reverse_exit': True, 'max_holding_days': 120,
+                       'target_vol': 0.25, **LLM_BASE}),
     # Referencia sin LLM (mismo MED) para medir cuanto APORTA el LLM-gate
-    ('MED_NOLLM',    {**MED_BASE, 'use_llm': False}),
+    ('MED_NOLLM',     {**MED_BASE, 'use_llm': False}),
 ]
 
 def random_window(rng):

@@ -108,7 +108,7 @@ Ranking v1 == ranking v2 == `BIG_VOL > MED > FREE > SAFE > BASELINE`. **Pero** e
 
 ## Tier 1.2 — Real news en backtest
 
-**Estado:** ACEPTADO ✓ (2026-04-26, validación directa por integración; E2E parcial)
+**Estado:** ACEPTADO con caveat E2E ⚠ (2026-04-26 integración OK; 2026-04-29 E2E con LLM real muestra Δ=0 vs no-LLM, pero NO empeora — el cache se mantiene útil para live trading y sentiment).
 **Objetivo:** rescatar el 25% del peso LLM que estaba dormido por el hardcode `sent = "Neutral (sin feed de noticias en backtest)"` (api.py:2221).
 **Archivos creados:** `utils/news_cache.py` (270 LoC), `tools/backfill_news.py` (60 LoC), directorio `cache/`.
 **Archivos modificados:** `api.py` (líneas 2160-2270): import del cache, contadores `sent_real_news` / `sent_implied_only`, sustitución del hardcode por `build_sentiment_string`.
@@ -163,6 +163,40 @@ curl -X POST localhost:5057/api/paper/autonomous-backtest -d @/tmp/tier12_nollm.
 
 - Test E2E con LLM activo (requiere máquina con ≥ 16 GB RAM libre, o quantización 4-bit del Qwen).
 - Si el upgrade a Qwen 1.5B (Tier 3.4) ocurre antes, validar entonces si el modelo extrae más señal del bloque de noticias real (vs implied solo).
+
+### Validación E2E real (2026-04-29, post-Tier 3.4 upgrade)
+
+Ejecución de `compare_with_llm.py 6` con `llm_provider=local-gguf` (Qwen2.5-1.5B Q4_K_M) — primera vez factible sin OOM. 6 ventanas seed=42, 5 variantes (4 con LLM + MED_NOLLM control), ~18 min total, 75 LLM calls (12.5/ventana).
+
+| variante       | avg_ret±CI95             | Sharpe±CI95          | Calmar | worst_DD | LLM calls | LLM vetos |
+|----------------|--------------------------|----------------------|--------|----------|-----------|-----------|
+| BASELINE_GGUF  | +62.69 % [+11.5,+116.6]  | +0.82 [+0.60,+1.11]  | +1.13  | -55.43%  | 12.5      | **0**     |
+| MED_LLM_GGUF   | +62.69 % [+11.5,+116.6]  | +0.82 [+0.60,+1.11]  | +1.13  | -55.43%  | 12.5      | **0**     |
+| BIG_VOL_GGUF   | +70.53 % [+12.3,+130.7]  | +0.89 [+0.64,+1.22]  | +1.16  | -60.62%  | 12.5      | **0**     |
+| SAFE_GGUF      | +70.53 % [+12.3,+130.7]  | +0.89 [+0.64,+1.22]  | +1.16  | -60.62%  | 12.5      | **0**     |
+| MED_NOLLM      | +62.69 % [+11.5,+116.6]  | +0.82 [+0.60,+1.11]  | +1.13  | -55.43%  | 0         | 0         |
+
+**Aplicando gate Tier 1.1 a `MED_LLM_GGUF` vs `MED_NOLLM`:**
+
+| Δ        | point | Veredicto                            |
+|----------|-------|--------------------------------------|
+| Δ_Sharpe | 0.000 | ✗ no mejora (gate exige IC95% > 0)   |
+| Δ_return | 0.00% | — neutral                            |
+| Δ_MaxDD  | 0.0pp | ✓ no empeora                         |
+
+**El LLM-gate single-pass con Qwen 1.5B GGUF NO mejora el sistema (pero tampoco empeora).** El upgrade Qwen 0.5B → 1.5B mejoró el instruction-following y la calibración hasta el punto de que el LLM ya **NO bloquea señales ML buenas con vetos arbitrarios** (Qwen 0.5B vetaba con frecuencia, era el bug original observado en api.py:821). Pero ese arreglo va al extremo opuesto: 0 vetos en 75 calls, demasiado permisivo en single-pass para añadir señal incremental.
+
+### Decisión 2026-04-29
+
+- **Tier 1.2 se mantiene en ACEPTADO con caveat**: el cache + implied sentiment + headlines reales sigue siendo:
+  1. Estrictamente mejor que el hardcode `"Neutral"` que había antes (path code-correct).
+  2. Útil para live trading (donde sí hay cobertura de noticias recientes y el LLM las consume).
+  3. Útil indirectamente para `analyze_sentiment` agente cuando se llama por separado (`use_llm=true` con `use_debate=false`).
+- **NO revertir el cache de noticias**: el problema no es el cache, es que el LLM-gate single-pass es demasiado permisivo. El cache sigue habilitado.
+- **NO promover a "ACEPTADO completo"**: el gate Tier 1.1 sigue sin cumplirse cuantitativamente para el LLM-gate completo en backtest.
+- **La esperanza queda en Tier 2.3 (debate)**: el judge multiplica el sizing entre 0.3 y 1.0. Esto puede modular DOWN cuando el bear case domina sin necesitar veto binario, lo cual sí podría aportar al MaxDD/Sharpe sin sacrificar entradas.
+
+JSON detalle: `/tmp/cwl_gguf_6w_tier12.json`.
 
 ---
 
