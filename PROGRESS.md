@@ -599,7 +599,7 @@ print(format_lessons_for_prompt(j.find_similar([0.01,0.7,0.05,0.04,0.30,0.22,1.5
 
 ## Tier 3.3 — A/B sweep ratio ML/LLM
 
-**Estado:** PARCIALMENTE LISTO ⚠ (parametrización ✓, validación A/B real DEFERRED por arquitectura).
+**Estado:** RECHAZADO ✗ (2026-04-29 sweep completo post-Tier 3.4 upgrade: ningún ratio ml_weight ∈ [0.6, 1.0] supera el gate Tier 1.1). Refactor del LLM-gate de veto-only a hybrid_score continuo IMPLEMENTADO y disponible, pero default vuelve a `ml_weight=1.0` (comportamiento legacy).
 **Objetivo del plan original:** sweep `ml_weight` ∈ {0.6, 0.65, 0.7, 0.75, 0.8, 0.85} sobre 12 ventanas y elegir el de mejor Calmar.
 **Cambio de scope realizado:** parametrización del código está hecha, pero la validación A/B real sobre backtest requiere refactor arquitectónico previo del LLM-gate. Documentado para próxima sesión.
 **Archivos modificados:** `api.py:_compute_hybrid_score` ahora acepta `ml_weight: float = 0.75` parametrizado (línea 944).
@@ -639,25 +639,70 @@ Esto es trabajo de medio día y NO está cubierto por los 6 Tiers ya completados
 - **El "75/25 vs 60/40" del plan original era una hipótesis, no un objetivo per se**: se basaba en que la mezcla hardcoded era arbitraria. Tras Tier 2.1+2.2, el sistema ya elige confidencia probabilísticamente; el ml_weight residual es menos crítico.
 - **Recomendación**: cuando se vaya a hacer este sweep, priorizar primero `mode=ml` backtests (no `mode=trend` que ignora ML) sobre 12 ventanas con harness Tier 1.1 + bootstrap CI.
 
-### Pendiente para siguiente sesión
+### Refactor implementado (2026-04-29)
 
-1. Refactor LLM-gate de veto → `(direction, confidence_continuous)` recolectado.
-2. Cambiar `_llm_decision` para devolver tupla, no string.
-3. Aplicar `_compute_hybrid_score` dentro del backtest loop.
-4. Crear `compare_hybrid_ratios.py` que itera 5-7 ratios y reporta por harness.
-5. Aceptar el ratio con mejor Calmar tras gate.
+`api.py:_llm_decision` ahora devuelve `dict {'rec': str, 'confidence': float}` en lugar de string. La cache trimestral cachea el dict completo.
 
-### Comando reproducible (parametrización ya disponible)
+En el backtest loop (`api.py:2746-2785`), antes del `_kelly`:
 
 ```python
-# Test directo de la parametrización:
-import sys; sys.path.insert(0,'.')
-from api import _compute_hybrid_score
-ml = {'ensemble_prediction': 0.02, 'ensemble_confidence': 0.7}
-ag = {'final_decision': 'COMPRA', 'final_confidence': 0.6}
-for w in [0.50, 0.60, 0.70, 0.75, 0.85]:
-    r = _compute_hybrid_score(ml, ag, ml_weight=w)
-    print(f'ml_weight={w}: score={r["score"]:+.4f} reco={r["recommendation"]}')
+base_ml_conf = float(bday.get('conf', 0.5))
+if use_llm and llm_dec is not None:
+    llm_conf = float(llm_dec.get('confidence', 0.5))
+    rec = str(llm_dec.get('rec', '')).upper()
+    if rec in ('HOLD', 'WAIT', 'MANTENER', ''):
+        llm_conf *= 0.7   # neutral = menos convicción
+    eff_conf = ml_weight * base_ml_conf + (1.0 - ml_weight) * llm_conf
+else:
+    eff_conf = base_ml_conf
+kelly = _kelly(bday['pred'], eff_conf, stop_pct)
+```
+
+Body request acepta `ml_weight ∈ [0, 1]`, default 1.0 (idéntico a veto-only legacy). El LLM sigue actuando como veto cuando contradice fuerte; cuando coincide o es neutral, su confianza se mezcla con la del ML para escalar el sizing vía Kelly.
+
+### Sweep validado (`compare_hybrid_ratios.py 6`, 2026-04-29)
+
+6 ventanas seed=42, 5 ratios + 1 control sin LLM, ~22 min, 0 OOM, **0 vetos en 360 LLM calls**.
+
+| variante       | avg_ret±CI95             | Sharpe±CI95          | Calmar  | worst_DD | score_v2 |
+|----------------|--------------------------|----------------------|---------|----------|----------|
+| MED_NOLLM      | +62.69 % [+11.5,+116.6]  | +0.82 [+0.60,+1.11]  | +1.131  | -55.43%  | 50.16    |
+| MED_GGUF_w60   | +61.88 % [+11.5,+116.0]  | +0.81 [+0.59,+1.10]  | +1.122  | -55.43%  | 49.42    |
+| MED_GGUF_w70   | +61.71 % [+11.7,+115.4]  | +0.82 [+0.60,+1.09]  | **+1.148** | -53.74% | **50.98** |
+| MED_GGUF_w80   | +62.54 % [+11.5,+116.6]  | +0.82 [+0.60,+1.10]  | +1.139  | -54.92%  | 50.47    |
+| MED_GGUF_w90   | +61.79 % [+11.5,+114.4]  | +0.82 [+0.60,+1.10]  | +1.130  | -54.88%  | 49.97    |
+| MED_GGUF_w100  | +62.69 % [+11.5,+116.6]  | +0.82 [+0.60,+1.11]  | +1.131  | -55.43%  | 50.16    |
+
+`w100` produce resultados IDÉNTICOS a `MED_NOLLM` — confirma que el refactor está bien implementado (con `ml_weight=1.0`, `eff_conf == base_ml_conf` y el LLM no afecta sizing, solo veto, que sigue sin disparar).
+
+`w70` tiene mejor Calmar (+1.148 vs +1.131 baseline) — el LLM modula sizing a la baja en ventanas con alta vol histórica (W5 worst_DD: -32.84% w60 vs -34.87% baseline) — pero la mejora NO supera el gate.
+
+### Aplicando gate Tier 1.1 (cada ratio vs MED_NOLLM)
+
+| variante       | Δ_Sharpe (CI95)         | Δ_return  | Δ_MaxDD  | Veredicto         |
+|----------------|--------------------------|-----------|----------|-------------------|
+| MED_GGUF_w60   | -0.009 [-0.02,-0.00]     | -0.81 pp  | +0.35 pp | ✗ peor Sharpe sig.|
+| MED_GGUF_w70   | -0.008 [-0.02,+0.00]     | -0.98 pp  | +0.60 pp | ✗ no mejora       |
+| MED_GGUF_w80   | -0.005 [-0.01,-0.00]     | -0.15 pp  | +0.29 pp | ✗ no mejora       |
+| MED_GGUF_w90   | -0.004 [-0.01,-0.00]     | -0.90 pp  | +0.20 pp | ✗ no mejora       |
+| MED_GGUF_w100  |  0.000 [+0.00,+0.00]     | +0.00 pp  | +0.00 pp | ≡ idéntico        |
+
+**Ningún ratio supera el gate** (Δ_Sharpe IC95% > 0). La gente conservadora podría argumentar que `w70` es el mejor por Calmar y mantenerlo; pero metodológicamente el gate Tier 1.1 dice rechazar y mantener el comportamiento legacy.
+
+### Lecciones / decisiones
+
+- **El refactor en sí está bien implementado** — el sweep produce diferencias diferenciables (vs el veto-only que producía resultados idénticos). El gate detecta correctamente que esas diferencias no son estadísticamente significativas.
+- **Default vuelve a `ml_weight=1.0`** (comportamiento legacy idéntico a veto-only). El parámetro queda disponible para reabrir tras cambios futuros que aumenten la varianza de las predicciones (e.g. mode=ml más ruidoso, features macro adicionales).
+- **Consistencia con Tier 1.2 y 2.3**: las 3 validaciones E2E del LLM (sentiment cache, debate, hybrid sizing) llegan a la misma conclusión — Qwen 1.5B GGUF es bueno cualitativamente (instruction-following, no flippea, no OOM) pero en backtest histórico no aporta señal incremental sobre el ML pre-filtrado por reglas determinísticas.
+- **Justificación TFG**: este resultado tiene valor pedagógico — demuestra que la integración LLM bien-implementada NO siempre traduce en mejora cuantitativa cuando el sistema base ya está bien-diseñado. Documenta el cuello de botella REAL (filtros pre-LLM saturan la señal).
+
+### Comando reproducible
+
+```
+# desde la raiz del repo
+PORT=5057 .venv/bin/python -u api.py &
+.venv/bin/python -u compare_hybrid_ratios.py 6   # ~22 min con LLM activo, 0 OOM
+# JSON detalle: /tmp/compare_hybrid_ratios_result.json
 ```
 
 ---

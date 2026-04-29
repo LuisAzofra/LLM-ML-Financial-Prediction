@@ -2103,6 +2103,13 @@ def paper_autonomous_backtest():
     # (símbolo, año-mes) → reduce drásticamente el coste de cómputo.
     use_llm     = bool(body.get('use_llm', False))
     llm_provider = str(body.get('llm_provider', 'local'))
+    # Tier 3.3: ml_weight ∈ [0,1] controla la mezcla ML/LLM en el sizing.
+    # Default 1.0 = LLM no afecta sizing (sólo veto, comportamiento legacy).
+    # Razón: el sweep en compare_hybrid_ratios.py NO encontró ningún ratio
+    # con Δ_Sharpe IC95% > 0 vs MED_NOLLM (ver PROGRESS.md Tier 3.3). La
+    # mezcla continua refactorizada está disponible pero off por default.
+    ml_weight   = float(body.get('ml_weight', 1.0))
+    ml_weight   = max(0.0, min(1.0, ml_weight))
     # Tier 2.3: bull/bear debate + judge (3× llamadas LLM por decisión).
     # Cache trimestral existente amortiza el coste. Off por default — el
     # gate del harness Tier 1.1 decide su valor neto.
@@ -2404,10 +2411,15 @@ def paper_autonomous_backtest():
             except Exception:
                 return ds[:7]
 
-        def _llm_decision(sym: str, ds: str, day: dict) -> str:
-            """Devuelve la recomendación textual del LLM con cache trimestral."""
+        def _llm_decision(sym: str, ds: str, day: dict) -> dict:
+            """Devuelve {'rec': str, 'confidence': float in [0,1]} con cache trimestral.
+
+            Tier 3.3 refactor: devuelve tupla (rec, confidence_continuous) en
+            lugar de sólo string. La confianza alimenta el _compute_hybrid_score
+            aguas abajo para modular sizing — vs el veto binario anterior.
+            """
             if not use_llm or llm is None:
-                return ''
+                return {'rec': '', 'confidence': 0.5}
             cache_k = (sym, _quarter_key(ds))
             if cache_k in llm_cache:
                 llm_stats['cache_hits'] += 1
@@ -2415,8 +2427,9 @@ def paper_autonomous_backtest():
             # Budget: dejar pasar (HOLD) sin llamar al modelo
             if llm_stats['calls'] >= llm_budget:
                 llm_stats['budget_skipped'] += 1
-                llm_cache[cache_k] = 'HOLD'
-                return 'HOLD'
+                out = {'rec': 'HOLD', 'confidence': 0.5}
+                llm_cache[cache_k] = out
+                return out
             close = day.get('close', 0.0)
             sma50  = day.get('sma50')
             sma200 = day.get('sma200')
@@ -2471,6 +2484,7 @@ def paper_autonomous_backtest():
             ml_sum = (f"Señal trend-follower: pred={pred:+.4f} "
                       f"({'LONG' if pred > 0 else 'SHORT'}), confianza={conf:.2f}.")
             t0 = time.time()
+            llm_conf = 0.5
             try:
                 # ── Tier 2.3: bull/bear debate + judge (opt-in) ─────────
                 if use_debate:
@@ -2481,12 +2495,12 @@ def paper_autonomous_backtest():
                     cm = float(deb.get('confidence_mult', 0.5))
                     direc_label = 'LONG' if (day.get('pred', 0.0) > 0) else 'SHORT'
                     if is_veto_from_debate(direc_label, cm, threshold=0.4):
-                        # judge confidence muy baja → HOLD (veto del lado bear)
                         rec = 'HOLD'
                     else:
-                        # ML decide dirección; debate sólo modula sizing aguas
-                        # arriba (kelly_scale × cm). Aquí simplemente NO vetamos.
                         rec = 'BUY' if direc_label == 'LONG' else 'SELL'
+                    # Tier 3.3: confidence_mult del judge ∈ [0.3, 1.0] mapea
+                    # razonablemente a [0, 1] para el hybrid score.
+                    llm_conf = float(np.clip(cm, 0.0, 1.0))
                     llm_stats.setdefault('debate_runs', 0)
                     llm_stats['debate_runs'] += 1
                     llm_stats.setdefault('debate_avg_conf_mult_sum', 0.0)
@@ -2497,14 +2511,22 @@ def paper_autonomous_backtest():
                     rec = str(parsed.get('recommendation', 'HOLD')).upper().strip()
                     if '|' in rec:
                         rec = 'HOLD'
+                    # Tier 3.3: extraer confianza continua del JSON parseado
+                    try:
+                        llm_conf = float(parsed.get('confidence', 0.5))
+                        llm_conf = float(np.clip(llm_conf, 0.0, 1.0))
+                    except Exception:
+                        llm_conf = 0.5
                     llm_stats['calls'] += 1
                     llm_stats['total_time'] += time.time() - t0
             except Exception as e:
                 logger.debug(f"LLM call error {sym} {ds}: {e}")
                 llm_stats['errors'] += 1
                 rec = 'HOLD'
-            llm_cache[cache_k] = rec
-            return rec
+                llm_conf = 0.5
+            out = {'rec': rec, 'confidence': llm_conf}
+            llm_cache[cache_k] = out
+            return out
 
         # ── 3. Simulación multi-activo ────────────────────────────────────────
         def _kelly(pred, conf, stop_pct):
@@ -2727,25 +2749,43 @@ def paper_autonomous_backtest():
                         if market_up is not None:
                             if direc == 'SHORT' and market_up: continue   # bull → no shorts en stocks
                             if direc == 'LONG'  and not market_up: continue  # bear → no longs en stocks
-                    # ── LLM veto (último gate, sólo si está activado) ────────────
-                    # El LLM analiza el contexto técnico y el riesgo, devolviendo
-                    # BUY/SELL/HOLD/WAIT. Si discrepa fuerte con la dirección del
-                    # bot, se descarta. HOLD/WAIT NO vetan (no añade fricción).
+                    # ── LLM gate (último gate, sólo si está activado) ────────────
+                    # Tier 3.3: el LLM ya no es sólo veto binario — devuelve
+                    # (rec, confidence_continuous). El veto se mantiene
+                    # cuando contradice fuerte; cuando coincide o es neutral,
+                    # la confianza alimenta el sizing aguas abajo.
+                    llm_dec_for_sizing = None
                     if use_llm:
-                        rec = _llm_decision(sym, ds, d)
+                        ld = _llm_decision(sym, ds, d)
+                        rec = ld.get('rec', '') if isinstance(ld, dict) else str(ld)
                         if direc == 'LONG' and rec in ('SELL', 'STRONG_SELL', 'VENDER', 'VENTA', 'VENTA_FUERTE'):
                             llm_stats['vetoed'] += 1
                             continue
                         if direc == 'SHORT' and rec in ('BUY', 'STRONG_BUY', 'COMPRAR', 'COMPRA', 'COMPRA_FUERTE'):
                             llm_stats['vetoed'] += 1
                             continue
-                    candidates.append((ss, sym, d, direc))
+                        llm_dec_for_sizing = ld if isinstance(ld, dict) else None
+                    candidates.append((ss, sym, d, direc, llm_dec_for_sizing))
 
                 # Tomar las top-N señales más fuertes
                 candidates.sort(key=lambda x: x[0], reverse=True)
-                for ss, sym, bday, direc in candidates[:n_slots]:
+                for ss, sym, bday, direc, llm_dec in candidates[:n_slots]:
                     stop_pct = (cfg.atr_stop_mult * bday['atr']) / max(bday['close'], 1e-8)
-                    kelly    = _kelly(bday['pred'], bday['conf'], stop_pct)
+                    # ── Tier 3.3: hybrid confidence (ml_weight × ml_conf + (1-w) × llm_conf) ──
+                    # Sólo si LLM activo y devolvió confidence_continuous. La
+                    # dirección sigue siendo 100% del ML (no flippeada por LLM).
+                    base_ml_conf = float(bday.get('conf', 0.5))
+                    if use_llm and llm_dec is not None:
+                        llm_conf = float(llm_dec.get('confidence', 0.5))
+                        # rec neutral (HOLD/WAIT) penaliza ligeramente; rec
+                        # alineado con ML deja confianza intacta o la sube.
+                        rec = str(llm_dec.get('rec', '')).upper()
+                        if rec in ('HOLD', 'WAIT', 'MANTENER', ''):
+                            llm_conf *= 0.7   # neutral = menos convicción
+                        eff_conf = ml_weight * base_ml_conf + (1.0 - ml_weight) * llm_conf
+                    else:
+                        eff_conf = base_ml_conf
+                    kelly    = _kelly(bday['pred'], eff_conf, stop_pct)
                     rel_str  = min(ss / max(threshold, 1e-9), 3.0)
                     vol_sc   = float(np.clip(cfg.target_vol / max(bday['volatility'], 0.05), 0.3, 2.0))
                     size_pct = min(kelly * rel_str * cfg.kelly_scale * vol_sc, cfg.max_position_pct)
