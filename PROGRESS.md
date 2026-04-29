@@ -444,7 +444,7 @@ print([c for c in add_cross_asset_features(df, 'ETH-USD', 'crypto').columns if c
 
 ## Tier 2.3 — Bull/bear debate + judge LLM
 
-**Estado:** IMPLEMENTADO ✓ (módulo + integración + tests sintéticos), validación A/B real **DEFERRED por OOM** en este Mac.
+**Estado:** RECHAZADO ✗ (2026-04-29 E2E real con Qwen 1.5B GGUF: gate Tier 1.1 no se cumple, Δ_Sharpe = 0). Código mantenido en `agents/debate.py`, **OFF por default** (`use_debate=False`).
 **Objetivo:** mejorar la calibración de confianza del LLM-gate sustituyendo single-pass por 3 pasadas (bull → bear → judge). El judge devuelve un multiplicador de sizing en `[0.3, 1.0]` SIN flippear la dirección que decide ML.
 **Archivos creados:** `agents/debate.py` (170 LoC).
 **Archivos modificados:** `api.py` (líneas 1953 flag `use_debate`, 2270-2305 integración en `_llm_decision`).
@@ -479,20 +479,46 @@ print([c for c in add_cross_asset_features(df, 'ETH-USD', 'crypto').columns if c
 - **Threshold de veto 0.4**: elegido conservador. Si confidence_mult ≥ 0.4, el bear case no domina suficiente como para vetar; sólo se modula size. < 0.4 → HOLD (bear case dominante).
 - **Validación A/B parcial**: tests sintéticos cubren happy path + parser. Pero el comportamiento de Qwen 0.5B real en los 3 prompts (especialmente el judge con su instrucción más matizada) NO se ha validado. Hay riesgo real de que Qwen 0.5B no siga la instrucción "do NOT flip direction" — el upgrade a Qwen 1.5B (Tier 3.4) sería un mitigante.
 
-### Pendiente para siguiente sesión
+### Validación E2E real (2026-04-29, post-Tier 3.4 upgrade)
 
-- Test E2E con LLM real activo (requiere ≥16 GB RAM o quantización Qwen).
-- Si Tier 3.4 promueve a Qwen 1.5B/3B, el debate debería funcionar mejor (capacidad para seguir instrucciones más complejas).
-- Si Qwen 0.5B + debate produce más errores que single-pass (parsing, alucinaciones), revertir use_debate=False.
+`compare_debate.py 6` con `llm_provider=local-gguf`, 6 ventanas seed=42, ~10 min total. 3 variantes: MED_NOLLM (control sin LLM), MED_LLM_GGUF (single-pass), MED_LLM_GGUF_DEBATE (3-pass bull/bear/judge).
+
+| variante              | avg_ret±CI95             | Sharpe±CI95          | Calmar | worst_DD | LLM calls | LLM vetos |
+|-----------------------|--------------------------|----------------------|--------|----------|-----------|-----------|
+| MED_NOLLM             | +62.69 % [+11.5,+116.6]  | +0.82 [+0.60,+1.11]  | +1.13  | -55.43%  | 0         | 0         |
+| MED_LLM_GGUF          | +62.69 % [+11.5,+116.6]  | +0.82 [+0.60,+1.11]  | +1.13  | -55.43%  | 12.5      | 0         |
+| MED_LLM_GGUF_DEBATE   | +62.69 % [+11.5,+116.6]  | +0.82 [+0.60,+1.11]  | +1.13  | -55.43%  | **37.5**  | 0         |
+
+**Aplicando gate Tier 1.1 a `MED_LLM_GGUF_DEBATE` vs `MED_LLM_GGUF`:**
+
+| Δ        | point | Veredicto                        |
+|----------|-------|----------------------------------|
+| Δ_Sharpe | 0.000 | ✗ no cumple gate (`< +0.10`)     |
+| Δ_return | 0.00% | — neutral                        |
+| Δ_MaxDD  | 0.0pp | ✓ no empeora                     |
+
+**El debate NO mejora el sistema cuantitativamente** (mismas decisiones que single-pass, que son las mismas que sin LLM). Conclusión consistente con Tier 1.2: el LLM 1.5B GGUF es demasiado permisivo en backtest histórico — sigue la instrucción "do NOT flip direction" del judge correctamente (buena señal de instruction-following), pero el `confidence_mult` que devuelve nunca cae por debajo del threshold de veto 0.4 en estas 6 ventanas.
+
+### Diagnóstico
+
+El judge respeta perfectamente las reglas del prompt (no hay parsing fallbacks, no hay errores). Pero en estos 75 backtests el bear case nunca gana suficiente como para que `confidence_mult < 0.4` (que es lo que produciría veto/HOLD). El sizing modulation [0.4, 1.0] sí ocurre, pero como el bot ya tiene Kelly+vol-scaling internos, la diferencia es marginal y no se traduce en cambio de decisiones de entrada/salida.
+
+Esto refleja una verdad estructural del bot híbrido: **las 4 capas de pre-filtrado (SMA200, ADX≥22, crash_filter, vol_scaling) ya filtran tanto que cuando llegamos al LLM, las señales ML que sobreviven ya son las "buenas". El LLM no tiene oportunidades reales para añadir señal incremental** — sólo aporta cuando el ML genera ruido, lo cual se filtra antes.
+
+### Lecciones / decisiones (revisadas 2026-04-29)
+
+- **Mantener `use_debate=False` por default**: 3× coste LLM sin retorno → no justificable en producción.
+- **No borrar `agents/debate.py`**: el módulo es correcto, los tests sintéticos pasan, y podría aportar valor en escenarios futuros donde el ML genere más ruido (mode=ml en lugar de mode=trend, o tras introducir features macro/cross-asset que aumenten la varianza de las predicciones).
+- **El judge respetando "do NOT flip direction" es valioso por sí solo** como prueba de que Qwen 1.5B GGUF sigue instrucciones complejas anidadas. Habilita futuros patterns multi-pass más sofisticados.
+- **Honestidad sobre la hipótesis original**: el plan asumía que un LLM mejor (1.5B) + debate mejoraría sizing. La realidad es que el cuello de botella ya no es el LLM — es que el bot ya está sobre-filtrado por reglas determinísticas. La conclusión es informativa para el TFG aunque no avance el retorno.
 
 ### Comando reproducible
 
 ```
-PORT=5057 .venv/bin/python api.py &
-# E2E con LLM real (CUIDADO: OOM probable en Mac < 16GB libres):
-curl -s -X POST localhost:5057/api/paper/autonomous-backtest \
-  -H 'Content-Type: application/json' \
-  -d '{"mode":"trend","start_date":"2025-12-01","end_date":"2026-04-15","use_llm":true,"use_debate":true,"llm_provider":"local","llm_budget":15}'
+# desde la raiz del repo
+PORT=5057 .venv/bin/python -u api.py &
+.venv/bin/python -u compare_debate.py 6     # ~10 min con LLM activo, 0 OOM
+# JSON detalle: /tmp/compare_debate_result.json
 ```
 
 ---
