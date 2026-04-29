@@ -4,17 +4,17 @@ para responder ¿es rentable? sin sesgar por una sola ventana.
 
 Plazos: 3M, 6M, 1Y, 2Y.
 Fechas de inicio: cubren bull / bear / lateral entre 2018-04 y 2023-04.
-Variante por defecto: MED_NOLLM (los gates Tier 1.2/2.3/3.3 confirmaron
-que las variantes con LLM son estadísticamente equivalentes a NOLLM,
-así que aquí medimos la rentabilidad real del sistema sin coste LLM).
 
-Salida: JSON en /tmp/perf_grid_result.json con todos los runs +
-estadísticos agregados por plazo.
+Variantes soportadas (`--variant`):
+  · MED  (default)   — kelly_scale=0.22, signal_percentile=0.82  (legacy)
+  · AGGR             — kelly_scale=0.30, signal_percentile=0.70  (Tier 4.1)
 
-Uso:
+Salida JSON con suffix `_<variant>`. Uso:
     PORT=5057 .venv/bin/python -u api.py &
-    .venv/bin/python -u tools/run_performance_grid.py
+    .venv/bin/python -u tools/run_performance_grid.py            # MED (default, sobreescribe /tmp/perf_grid_result.json)
+    .venv/bin/python -u tools/run_performance_grid.py --variant aggr   # AGGR → /tmp/perf_grid_aggr_result.json
 """
+import argparse
 import json
 import os
 import sys
@@ -64,9 +64,17 @@ MED_BASE = {
     'use_llm': False,
 }
 
+# Tier 4.1 — variante AGGR validada en compare_aggressive.py 12 ventanas
+AGGR_BASE = {**MED_BASE, 'signal_percentile': 0.70, 'kelly_scale': 0.30}
 
-def call(start_date: str, end_date: str) -> dict:
-    body = {**MED_BASE, 'start_date': start_date, 'end_date': end_date}
+VARIANT_CONFIGS = {
+    'med':  ('MED_NOLLM',         MED_BASE,  '/tmp/perf_grid_result.json'),
+    'aggr': ('AGGR_KELLY_PCT',    AGGR_BASE, '/tmp/perf_grid_aggr_result.json'),
+}
+
+
+def call(start_date: str, end_date: str, body_base: dict) -> dict:
+    body = {**body_base, 'start_date': start_date, 'end_date': end_date}
     req = urlreq.Request(
         f"{API}/api/paper/autonomous-backtest",
         method="POST",
@@ -101,11 +109,18 @@ def add_days(date_str: str, n: int) -> str:
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--variant', choices=list(VARIANT_CONFIGS.keys()), default='med',
+                        help='med (default, baseline) o aggr (Tier 4.1)')
+    args = parser.parse_args()
+    variant_label, body_base, out_path = VARIANT_CONFIGS[args.variant]
+
     today = datetime.now().date()
     runs = []
     skipped = []
 
-    print(f"Grid: {len(START_DATES)} fechas × {len(HORIZONS)} plazos = {len(START_DATES)*len(HORIZONS)} backtests (sin LLM, ~3-5s cada uno)")
+    print(f"Grid: {len(START_DATES)} fechas × {len(HORIZONS)} plazos = {len(START_DATES)*len(HORIZONS)} backtests")
+    print(f"Variante: {variant_label}  config={body_base}")
     print()
 
     for sd in START_DATES:
@@ -117,7 +132,7 @@ def main():
                 continue
             ed = end_dt.strftime('%Y-%m-%d')
             try:
-                r = call(sd, ed)
+                r = call(sd, ed, body_base)
                 r['horizon'] = h_label
                 r['horizon_days'] = h_days
                 runs.append(r)
@@ -178,14 +193,14 @@ def main():
 
     out = {
         'generated_at': datetime.now().isoformat(timespec='seconds'),
+        'variant': variant_label,
         'horizons': [(l, d) for l, d in HORIZONS],
         'start_dates': START_DATES,
-        'config': MED_BASE,
+        'config': body_base,
         'runs': runs,
         'skipped': skipped,
         'summary_by_horizon': summary_by_horizon,
     }
-    out_path = '/tmp/perf_grid_result.json'
     with open(out_path, 'w') as f:
         json.dump(out, f, indent=2, default=str)
     print(f"\n→ JSON: {out_path}")

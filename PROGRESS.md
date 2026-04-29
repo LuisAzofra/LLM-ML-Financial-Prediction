@@ -833,3 +833,126 @@ Qwen2.5-0.5B (provider="local") tiene tres limitaciones observadas en este proye
 **RECOMIENDO HACER EL UPGRADE en próxima sesión** como primer paso para desbloquear todas las validaciones E2E pendientes (Tier 1.2 sentiment LLM, Tier 2.3 debate, Tier 3.3 sweep). Sin upgrade, esos 3 Tiers no pueden validarse cuantitativamente.
 
 Este Tier no requiere código en esta sesión — el upgrade real toca utils/llm_client.py y se hará junto con la primera validación E2E real del sistema completo.
+
+---
+
+## Tier 4.1 — Aflojar conservadurismo (filtros + sizing)
+
+**Estado:** ACEPTADO ✓ (2026-04-30, AGGR_KELLY_PCT pasa gate Agresivo sobre 12 ventanas).
+**Objetivo:** atacar el hallazgo del dashboard (`/tmp/perf_grid_result.json`): el bot baseline solo bate B&H en 20% de runs y pierde a plazos cortos. Diagnóstico forense (Fase 0) confirma que el bot está sobre-filtrado y sub-dimensionado.
+**Archivos creados:** `tools/measure_filter_rejection.py`, `tools/sweep_filters_sizing.py`, `compare_aggressive.py`, `tools/dashboard_compare.py`.
+**Archivos modificados:** `api.py` (4 LoC: `disable_golden_cross`, `regime_adx_min` override, `max_concurrent` parametrizable, `debug_filter_counts`), `utils/backtest_metrics.py` (+50 LoC: `aggressive_gate`), `tools/run_performance_grid.py` (extender CLI con `--variant {med,aggr}`).
+
+### Diagnóstico Fase 0 (medición de rechazos por filtro, 6 ventanas)
+
+| filtro              | rechazados | % del total |
+|---------------------|-----------:|------------:|
+| signal_percentile   |     18 507 |    **94.17 %** |
+| no_direction        |        902 |       4.59 % |
+| adx_filter          |         76 |       0.39 % |
+| spy_regime          |         56 |       0.28 % |
+| crash_filter        |         32 |       0.16 % |
+| sma200_filter       |          3 |       0.02 % |
+| **golden_cross**    |          0 |       0.00 % |
+| **quality_gate**    |          0 |       0.00 % |
+| asset_r2_gate       |          0 |       0.00 % |
+| pasaron todos       |         76 |       0.39 % |
+
+**Hallazgos contraintuitivos:**
+- El **signal_percentile (top-18%) rechaza 94% de TODO**. Es el cuello dominante.
+- **golden_cross rechaza CERO** — es completamente redundante con SMA200 (redundancia: si precio<SMA200, también SMA50<SMA200 casi siempre).
+- ADX, SMA200, SPY regime y crash_filter rechazan en conjunto < 1%. NO son el problema.
+- El diagnóstico inicial del agente Explore (que apuntaba a ADX/golden_cross como culpables) **estaba equivocado** — la medición empírica refuta esa hipótesis.
+
+### Sweeps Fase 1 (gate Agresivo: Δ_Sharpe IC95% > 0 Y (Δ_ret IC95% > +5pp O Δ_DD ≤ +2pp); hard reject si Δ_DD < −10pp o Δ_ret IC95% upper < −2pp)
+
+| Exp | Parámetro            | Valores probados                         | Ganador individual |
+|-----|----------------------|------------------------------------------|--------------------|
+| E1  | signal_percentile    | {0.82, 0.75, 0.70, 0.65, 0.60}           | — sin ganador (Sharpe mejora mucho pero CIs anchos no superan ret_lo > +5pp) |
+| E2  | regime_adx_min       | {22, 18, 15, 10, 0}                      | — empeora Sharpe consistentemente |
+| E3  | disable_golden_cross | {off, on}                                | — Δ exactamente 0 (filtro inactivo) |
+| E4  | kelly_scale          | {0.22, 0.30, 0.40, 0.50, 0.60}           | **kelly_scale=0.30** ✓ |
+| E5  | max_position_pct     | {0.18, 0.22, 0.26, 0.30, 0.35}           | — Δ exactamente 0 (cap inactivo: el sizing actual está bajo 0.18) |
+| E6  | max_concurrent       | {3, 4, 5}                                | — Sharpe baja (más posiciones diluyen las buenas) |
+
+E4 ganador: `kelly_scale=0.30 vs 0.22` → Δ_Sharpe +0.120 [+0.05, +0.18], Δ_return +19.61pp, Δ_DD −6.10pp (dentro del −10pp tope). `kelly_scale=0.40+` rechazado-HARD por DD < −10pp.
+
+### Validación Fase 2 (12 ventanas seed=42, A/B vs MED_NOLLM)
+
+| variante         | avg_ret±CI95              | Sharpe±CI95          | MaxDD   | Calmar | %pos | trades |
+|------------------|---------------------------|----------------------|---------|--------|------|--------|
+| MED_NOLLM        | +29.67% [+0.0, +65.6]     | +0.71 [+0.55, +0.89] | -32.59% | +0.54  | 67%  | 9.4    |
+| AGGR_KELLY       | +40.19% [+3.0, +86.4]     | +0.84 [+0.66, +1.04] | -38.61% | +0.66  | 67%  | 9.4    |
+| **AGGR_KELLY_PCT** | **+51.44%** [+14.5, +95.9] | **+0.93** [+0.75, +1.12] | -40.99% | **+0.90** | **75%** | **10.7** |
+
+**Aplicando gate Agresivo sobre AGGR_KELLY_PCT vs MED_NOLLM:**
+
+| Δ        | point   | CI95           | Veredicto                             |
+|----------|---------|----------------|---------------------------------------|
+| Δ_Sharpe | +0.217  | [+0.141,+0.291]| ✓ sharpe_positive (CI lo > 0)         |
+| Δ_return | +21.77pp| [+10.16,+35.59]| ✓ return_big_win (CI lo > +5pp)       |
+| Δ_MaxDD  | −8.40pp | [−11.13,−5.48] | ✓ NO disaster (≥ −10pp)               |
+| **VEREDICTO** | | | **ACEPTA** |
+
+`AGGR_KELLY` solo (sin signal_pct) NO acepta — return_big_win=False (CI lo +2.65pp < +5pp). La combinación con `signal_percentile=0.70` rescata el gate. **Lección clave**: cambios individualmente no significativos pueden ser sinérgicos.
+
+### Validación Fase 3 (40 backtests sobre cuadrícula 10 fechas × 4 plazos)
+
+`tools/dashboard_compare.py` muestra side-by-side. Comparativa global:
+
+| KPI global       | MED_NOLLM | AGGR_KELLY_PCT | Δ      |
+|------------------|-----------|-----------------|--------|
+| avg_return       | +17.63 %  | **+24.13 %**    | +6.5pp |
+| runs positivos   | 20/40 (50%) | 21/40 (52.5%) | +1     |
+| runs baten B&H   | 8/40 (20%) | 7/40 (17.5%)  | -1 ⚠   |
+| runs sin trades  | 7/40      | **2/40**       | −5 ✓   |
+| avg trades/run   | 7.0       | **9.4**         | +2.4   |
+| avg MaxDD        | -18.4 %   | -27.9 %         | -9.5pp |
+
+**Por plazo (lo más relevante):**
+
+| plazo | MED ret | AGGR ret | Δ       | MED Sharpe | AGGR Sharpe |
+|-------|---------|----------|---------|------------|--------------|
+| 3M    | -3.51%  | -12.23%  | -8.7pp  | +0.33      | +0.80        |
+| 6M    | +4.54%  | -0.27%   | -4.8pp  | +0.53      | +0.81        |
+| 1Y    | +21.60% | **+34.86%** | +13.3pp | +0.54     | **+0.89**     |
+| 2Y    | +47.91% | **+74.19%** | +26.3pp | +0.59     | **+0.93**     |
+
+A 1-2 años AGGR mejora claramente; en 3-6M empeora (más exposición = más volatilidad). La pérdida de un caso de "alpha+" se compensa con el +37% en avg_return global.
+
+### Lecciones / decisiones
+
+- **El diagnóstico inicial del agente Explore se equivocó**: apuntaba a ADX y Golden Cross como filtros que capaban upside. La medición empírica probó que rechazan <0.5% combinado. Sin la Fase 0 de medición real, habríamos perdido tiempo en sweeps inútiles.
+- **El cuello de botella real son DOS COSAS combinadas**, no una sola: signal_percentile demasiado restrictivo + kelly_scale demasiado pequeño. Los sweeps individuales no detectan sinergias — la Fase 2 es esencial.
+- **`max_position_pct` y `disable_golden_cross` son inútiles individualmente** porque sus caps/filtros NO se activan en el sizing actual. Para que importen habría que cambiar también algo aguas arriba (más kelly_scale, más sizing).
+- **AGGR no es Pareto-superior**: empeora 3M/6M y aumenta MaxDD. Es una elección consciente de "más upside a cambio de más DD" — alineado con la decisión del usuario de gate Agresivo.
+- **Dashboard comparativo (tools/dashboard_compare.py)** debería ser el primer paso de cualquier futura validación de cambios paramétricos. Permite ver visualmente trade-offs que los números agregados ocultan.
+- **El bot ya está cerca del Pareto-frontier** para esta era 2018-24: solo combinaciones ajustadas finas pasan gates. Ganancias mayores requerirían **mode=ml** (predicciones más ricas) o cambio de universo (ETFs, factor-tilted), no más tweaking de parámetros trend.
+
+### Comando reproducible
+
+```
+# desde la raiz del repo
+PORT=5057 .venv/bin/python -u api.py &
+
+# Fase 0 — diagnóstico
+.venv/bin/python -u tools/measure_filter_rejection.py 6
+
+# Fase 1 — sweeps individuales (~20 min)
+.venv/bin/python -u tools/sweep_filters_sizing.py
+
+# Fase 2 — validación combinada (12 ventanas, ~10 min)
+.venv/bin/python -u compare_aggressive.py 12
+
+# Fase 3 — grid + dashboard comparativo
+.venv/bin/python -u tools/run_performance_grid.py                  # MED baseline
+.venv/bin/python -u tools/run_performance_grid.py --variant aggr   # AGGR Tier 4.1
+.venv/bin/python -u tools/dashboard_compare.py
+open /tmp/dashboard_compare.html
+```
+
+### Pendiente / siguientes pasos
+
+- **Activar AGGR_KELLY_PCT como default trend mode**: cambiar `signal_percentile=0.82→0.70` y `kelly_scale=0.22→0.30` en BotConfig requiere validación adicional de live trading. Por ahora se documenta como variante recomendada pero default queda inalterado para compatibilidad con runs históricos.
+- **Investigar mode=ml**: los gates de Tiers 2-3 mostraron que el LLM no aporta valor sobre las señales filtradas, pero `mode=ml` (sin filtros tan agresivos, con ML como decisor primario) podría aprovechar mejor el ensemble calibrado.
+- **Considerar universo extendido**: añadir ETFs (SPY, QQQ, IWM) para diversificación sectorial y reducir concentración en 6 stocks tech + 4 cryptos.

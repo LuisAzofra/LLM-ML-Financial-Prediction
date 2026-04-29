@@ -217,6 +217,53 @@ def acceptance_gate(
     }
 
 
+def aggressive_gate(
+    rows_baseline: List[Tuple[int, str, str, Dict[str, float]]],
+    rows_new: List[Tuple[int, str, str, Dict[str, float]]],
+    n_resamples: int = 1000,
+) -> Dict[str, Any]:
+    """
+    Tier 4.1 — Gate "agresivo" para sweeps de aflojamiento del bot.
+
+    ACEPTA si:
+        Δ_Sharpe IC95% lower bound > 0
+        Y (Δ_avg_return IC95% lower bound > +5pp  O  Δ_MaxDD ≤ +2pp)
+    RECHAZO duro si:
+        Δ_avg_return IC95% upper bound < -2pp  O  Δ_MaxDD < -10pp (empeora >10pp)
+
+    Filosofía: tolera más MaxDD si compensa con upside real (significativo).
+    Acordado con el usuario para esta tanda — el bot es demasiado conservador.
+    """
+    sh = delta_ci(rows_baseline, rows_new, 'sharpe', n_resamples, 0.95, 0)
+    rt = delta_ci(rows_baseline, rows_new, 'return', n_resamples, 0.95, 1)
+    dd = delta_ci(rows_baseline, rows_new, 'maxdd',  n_resamples, 0.95, 2)
+
+    sharpe_positive = sh is not None and sh['ci_lo'] > 0.0
+    return_big_win  = rt is not None and rt['ci_lo'] > 5.0
+    dd_safe         = dd is not None and dd['point'] >= -2.0
+    dd_disaster     = dd is not None and dd['point'] < -10.0
+    return_disaster = rt is not None and rt['ci_hi'] < -2.0
+
+    accepted = bool(sharpe_positive and (return_big_win or dd_safe))
+    hard_reject = bool(dd_disaster or return_disaster)
+
+    return {
+        'delta_sharpe': sh,
+        'delta_return': rt,
+        'delta_maxdd':  dd,
+        'sharpe_positive':  sharpe_positive,
+        'return_big_win':   return_big_win,
+        'dd_safe':          dd_safe,
+        'dd_disaster':      dd_disaster,
+        'return_disaster':  return_disaster,
+        'accepted':         accepted and not hard_reject,
+        'hard_reject':      hard_reject,
+        'verdict':  ('ACEPTA' if (accepted and not hard_reject)
+                     else ('RECHAZA-HARD' if hard_reject
+                           else 'no acepta')),
+    }
+
+
 def regime_by_bh_quintile(
     rows: List[Tuple[int, str, str, Dict[str, float]]],
     n_quintiles: int = 5,

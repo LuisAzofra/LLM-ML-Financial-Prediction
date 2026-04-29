@@ -2110,6 +2110,12 @@ def paper_autonomous_backtest():
     # mezcla continua refactorizada está disponible pero off por default.
     ml_weight   = float(body.get('ml_weight', 1.0))
     ml_weight   = max(0.0, min(1.0, ml_weight))
+    # Tier 4.1: parámetros para sweeps de aflojamiento de filtros + sizing.
+    # Todos opt-in: defaults preservan comportamiento histórico.
+    disable_golden_cross = bool(body.get('disable_golden_cross', False))
+    regime_adx_min_override = body.get('regime_adx_min')   # None ⇒ usa default cfg
+    max_concurrent = int(body.get('max_concurrent', 3))
+    debug_filter_counts = bool(body.get('debug_filter_counts', False))
     # Tier 2.3: bull/bear debate + judge (3× llamadas LLM por decisión).
     # Cache trimestral existente amortiza el coste. Off por default — el
     # gate del harness Tier 1.1 decide su valor neto.
@@ -2176,7 +2182,9 @@ def paper_autonomous_backtest():
         commission=commission_rate,
         regime_use_sma200=True,
         regime_crash_filter=True,
-        regime_adx_min=(0.0 if disable_adx_filter else 22.0),
+        regime_adx_min=(0.0 if disable_adx_filter
+                        else (float(regime_adx_min_override) if regime_adx_min_override is not None
+                              else 22.0)),
         atr_stop_mult=2.0,
         max_position_pct=0.18,
         target_vol=float(target_vol_override) if target_vol_override is not None else 0.15,
@@ -2349,6 +2357,13 @@ def paper_autonomous_backtest():
         llm_stats = {'calls': 0, 'cache_hits': 0, 'errors': 0, 'vetoed': 0,
                      'budget_skipped': 0, 'total_time': 0.0,
                      'sent_real_news': 0, 'sent_implied_only': 0}
+        # Tier 4.1: contadores opt-in de filtros (solo si debug_filter_counts=True).
+        filter_counts = {
+            'total_evaluated': 0, 'signal_percentile': 0, 'quality_gate': 0,
+            'asset_r2_gate': 0, 'no_direction': 0, 'sma200_filter': 0,
+            'golden_cross': 0, 'adx_filter': 0, 'crash_filter': 0,
+            'spy_regime': 0,
+        }
         # Budget: si se supera, no se llama más al LLM y se devuelve HOLD por defecto.
         # Esto evita que un backtest se quede colgado durante horas si hay muchos candidatos.
         llm_budget = int(body.get('llm_budget', 60))
@@ -2536,7 +2551,7 @@ def paper_autonomous_backtest():
             b = max(2 * abs(float(pred)) / risk, 0.5)
             return float(np.clip((p * b - (1 - p)) / b, 0.0, 1.0))
 
-        MAX_CONCURRENT = 3   # posiciones simultáneas máximas
+        MAX_CONCURRENT = max(1, int(max_concurrent))   # Tier 4.1: parametrizable (default 3)
 
         capital     = cfg.initial_capital
         positions   = {}   # sym → position_dict (múltiples posiciones simultáneas)
@@ -2697,58 +2712,64 @@ def paper_autonomous_backtest():
                     d  = dm[ds]
                     ss = abs(d['pred']) * d['conf']
                     all_ss.append(ss)
+                    if debug_filter_counts: filter_counts['total_evaluated'] += 1
                     if ss <= threshold:
+                        if debug_filter_counts: filter_counts['signal_percentile'] += 1
                         continue
                     # ── Quality gate per-señal ────────────────────────────────────
-                    # Antes: pred=0.005×conf=0.85=ss=0.0042 podía pasar si threshold
-                    # caía. Ahora exigimos AMBAS componentes mínimas → la señal
-                    # tiene que tener tanto magnitud como agreement entre modelos.
-                    # 0.8% de retorno predicho × 45% confianza = filtra ruido sub-modelo.
                     if abs(d['pred']) < 0.008 or d['conf'] < 0.45:
+                        if debug_filter_counts: filter_counts['quality_gate'] += 1
                         continue
                     # ── Gate de calidad por activo (R² CV pre-test, leak-free) ───
-                    # Activos con val_r2 << 0 → el modelo predice peor que la media
-                    # incluso dentro del training. Operarlos es operar puro ruido.
-                    # Umbral -0.30: tolera ruido razonable pero descarta los modelos
-                    # claramente rotos (ej. AAPL/TSLA/BTC en runs previos).
                     if asset_val_r2.get(sym, 0.0) < -0.30:
+                        if debug_filter_counts: filter_counts['asset_r2_gate'] += 1
                         continue
                     direc = ('LONG' if d['pred'] > 0 else ('SHORT' if d['pred'] < 0 and cfg.allow_short else None))
                     if direc is None:
+                        if debug_filter_counts: filter_counts['no_direction'] += 1
                         continue
                     # Filtro SMA_200 (precio vs su propia media de 200d)
                     if cfg.regime_use_sma200 and d['sma200'] is not None:
-                        if direc == 'LONG'  and d['close'] < d['sma200']: continue
-                        if direc == 'SHORT' and d['close'] > d['sma200']: continue
+                        if direc == 'LONG'  and d['close'] < d['sma200']:
+                            if debug_filter_counts: filter_counts['sma200_filter'] += 1
+                            continue
+                        if direc == 'SHORT' and d['close'] > d['sma200']:
+                            if debug_filter_counts: filter_counts['sma200_filter'] += 1
+                            continue
                     # ── Confirmación de Golden Cross (SMA50 vs SMA200) ────────────
-                    # Faber + Antonacci + Turtle: la confluencia de SMA50>SMA200
-                    # (golden cross) es el filtro estructural de tendencia secular.
-                    # Solo LONG si SMA50>SMA200 (régimen alcista del activo).
-                    # Solo SHORT si SMA50<SMA200 (death cross). Esto elimina
-                    # rebounds falsos durante transiciones de régimen.
-                    if d['sma50'] is not None and d['sma200'] is not None:
+                    # Tier 4.1: opt-out vía disable_golden_cross para sweeps.
+                    if (not disable_golden_cross
+                            and d['sma50'] is not None and d['sma200'] is not None):
                         golden = d['sma50'] > d['sma200']
-                        if direc == 'LONG'  and not golden: continue
-                        if direc == 'SHORT' and golden:     continue
+                        if direc == 'LONG'  and not golden:
+                            if debug_filter_counts: filter_counts['golden_cross'] += 1
+                            continue
+                        if direc == 'SHORT' and golden:
+                            if debug_filter_counts: filter_counts['golden_cross'] += 1
+                            continue
                     # Filtro ADX (tendencia mínima requerida)
-                    if d['adx'] is not None and d['adx'] < cfg.regime_adx_min: continue
+                    if d['adx'] is not None and d['adx'] < cfg.regime_adx_min:
+                        if debug_filter_counts: filter_counts['adx_filter'] += 1
+                        continue
                     # Filtro de crash: evitar LONG tras caída >5% en 5 días
                     if cfg.regime_crash_filter and direc == 'LONG':
                         sorted_sym_dates = sorted(k for k in dm if k <= ds)
                         if len(sorted_sym_dates) >= 6:
                             p5d_ago = dm[sorted_sym_dates[-6]]['close']
                             if p5d_ago > 0 and (d['close'] / p5d_ago - 1) < cfg.regime_crash_threshold:
+                                if debug_filter_counts: filter_counts['crash_filter'] += 1
                                 continue
-                    # Filtro de régimen SPY (sólo aplica a STOCKS — crypto es descorrelacionada).
-                    # · SPY > SMA200 (bull market): NO shorts en stocks (con tendencia secular).
-                    # · SPY < SMA200 (bear market): NO longs en stocks salvo que el propio
-                    #   activo esté arriba de SU SMA200 (eso ya lo filtra regime_use_sma200).
+                    # Filtro de régimen SPY (sólo aplica a STOCKS).
                     is_stock = not sym.endswith('-USD')
                     if spy_regime and is_stock:
                         market_up = spy_regime.get(ds)
                         if market_up is not None:
-                            if direc == 'SHORT' and market_up: continue   # bull → no shorts en stocks
-                            if direc == 'LONG'  and not market_up: continue  # bear → no longs en stocks
+                            if direc == 'SHORT' and market_up:
+                                if debug_filter_counts: filter_counts['spy_regime'] += 1
+                                continue
+                            if direc == 'LONG'  and not market_up:
+                                if debug_filter_counts: filter_counts['spy_regime'] += 1
+                                continue
                     # ── LLM gate (último gate, sólo si está activado) ────────────
                     # Tier 3.3: el LLM ya no es sólo veto binario — devuelve
                     # (rec, confidence_continuous). El veto se mantiene
@@ -2993,6 +3014,7 @@ def paper_autonomous_backtest():
                 'avg_latency':     round(llm_stats['total_time'] / max(llm_stats['calls'], 1), 2) if use_llm else 0.0,
             },
             'risk_gate_stats': risk_gate.stats() if risk_gate is not None else {'enabled': False},
+            'filter_counts': filter_counts if debug_filter_counts else None,
             'performance': {
                 'initial_capital':    init_cap,
                 'final_value':        round(final_val, 2),
