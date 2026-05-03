@@ -1,8 +1,10 @@
 """
-Tier 4.1 — Dashboard comparativo MED_NOLLM (baseline) vs AGGR_KELLY_PCT.
+Tier 4.1/4.2 — Dashboard comparativo de variantes del bot.
 
-Lee /tmp/perf_grid_result.json (baseline) y /tmp/perf_grid_aggr_result.json
-(Tier 4.1) y genera HTML standalone con Plotly inline:
+Lee 2 o 3 JSONs de tools/run_performance_grid.py y genera HTML standalone:
+  · /tmp/perf_grid_result.json          — MED (baseline)
+  · /tmp/perf_grid_aggr_result.json     — AGGR_KELLY_PCT (Tier 4.1)
+  · /tmp/perf_grid_aggr_plus_result.json (opcional) — AGGR_PLUS_C3 (Tier 4.2 con top-N)
 
   1. KPIs side-by-side con Δ explícito
   2. Tabla resumen por plazo (3M/6M/1Y/2Y, ambas variantes)
@@ -29,6 +31,7 @@ from plotly.subplots import make_subplots
 
 MED_PATH  = '/tmp/perf_grid_result.json'
 AGGR_PATH = '/tmp/perf_grid_aggr_result.json'
+PLUS_PATH = '/tmp/perf_grid_aggr_plus_result.json'   # Tier 4.2 (opcional)
 OUT_PATH  = '/tmp/dashboard_compare.html'
 
 

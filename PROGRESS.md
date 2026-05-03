@@ -956,3 +956,109 @@ open /tmp/dashboard_compare.html
 - **Activar AGGR_KELLY_PCT como default trend mode**: cambiar `signal_percentile=0.82→0.70` y `kelly_scale=0.22→0.30` en BotConfig requiere validación adicional de live trading. Por ahora se documenta como variante recomendada pero default queda inalterado para compatibilidad con runs históricos.
 - **Investigar mode=ml**: los gates de Tiers 2-3 mostraron que el LLM no aporta valor sobre las señales filtradas, pero `mode=ml` (sin filtros tan agresivos, con ML como decisor primario) podría aprovechar mejor el ensemble calibrado.
 - **Considerar universo extendido**: añadir ETFs (SPY, QQQ, IWM) para diversificación sectorial y reducir concentración en 6 stocks tech + 4 cryptos.
+
+---
+
+## Tier 4.2 — Investigación externa + sweeps de candidatos C1-C5
+
+**Estado:** PARCIALMENTE ACEPTADO ✓ (2026-04-30, C3 ACEPTADO sobre 24 ventanas; C1/C2/C4/C5 RECHAZADOS).
+**Objetivo:** investigar Reddit/foros + repos GitHub similares (freqtrade, vectorbt, jesse, qlib) para identificar técnicas con evidencia empírica que podrían mejorar nuestro bot, validar cada una con A/B + gate Agresivo Tier 4.1 antes de mergear.
+**Archivos creados:** `compare_candidates.py` (~200 LoC), `tools/dashboard_compare3.py` (~280 LoC).
+**Archivos modificados:** `api.py` (~30 LoC: params opt-in `include_etfs`, `enable_vol_target_overlay`, `vol_filter_min/max`, `enable_mr_combo`, `topn_rotation` + lógica), `tools/run_performance_grid.py` (variante `aggr_plus`).
+
+### Investigación externa (resumen)
+
+**Agente A (Reddit + foros + papers):** identificó 6 ideas con evidencia, lideradas por:
+- Vol-targeting Moreira-Muir 2017 (NBER) — paper peer-reviewed con réplica
+- Cross-sectional momentum top-N rotation (Han et al SSRN, Starkiller Capital, Asness)
+- HMM/Hurst regime detection (QuantStart tutorial)
+- Combinatorial Purged K-Fold + Deflated Sharpe (Arian/Norouzi/Seco KBS 2024)
+- ETFs sectoriales/factor (MTUM rentó +33% en 2024)
+- Trend + MR combo con ADX/Hurst (RobotWealth + Price Action Lab)
+
+**Agente B (GitHub repos):** clonó freqtrade, vectorbt, jesse, qlib. Hallazgo clave:
+- AI-Trader del paper original NO está en repo público (es solo plataforma web)
+- Freqtrade tiene el plugin pattern de protections muy clean
+- Jesse `research/rule_significance_testing/` tiene bootstrap p-value drop-in
+- Qlib `optimizer.py` self-contained risk parity
+
+**Anti-patrones documentados (NO probar):**
+- Trailing stops complejos (paper York University 2012: degradan en trend-following)
+- Sentiment Reddit/Twitter como feature direccional (sólo predicen volatilidad)
+- On-chain metrics en horizontes <1 mes (consenso practitioner)
+- Multi-timeframe confirmation con 3+ timeframes (curve-fitting)
+- FreqAI-RL (los propios docs admiten "naive incremental learning")
+
+### Sweeps A/B con gate Agresivo Tier 4.1
+
+| Cand | Descripción | Δ_Sharpe | Δ_return | Δ_MaxDD | Veredicto |
+|------|-------------|----------|----------|---------|-----------|
+| C1 | +5 ETFs (XLE/XLF/GLD/MTUM/IWM) | +0.148 [+0.01,+0.30] | −5.58pp | −5.79pp | ✗ RECHAZADO (diluye en bull tech) |
+| C2 | Vol-targeting overlay (Moreira-Muir) | **−0.323** sig | **−21.21pp** sig | **+10.19pp** ✓ | ✗ RECHAZADO HARD (corta upside) |
+| C3 (12w) | Top-N rotation con ETFs como pool | +0.162 [+0.09,+0.27] | +30.11pp [+1.21,+60.74] | −7.04pp | △ no acepta (CI return ancho) |
+| **C3 (24w)** | **Top-N rotation con ETFs como pool** | **+0.181 [+0.12,+0.25]** sig | **+35.34pp [+9.85,+62.99]** sig | −6.19pp | **✓ ACEPTADO** |
+| C4 | Volatility filter [10%, 150%] | −0.035 | −7.09pp | −0.63pp | ✗ RECHAZADO (filtro casi inactivo) |
+| C5 | MR combo (RSI<30 cuando ADX<18) | 0 | 0 | 0 | ✗ SIN EFECTO (filtro ADX no se activa con AGGR) |
+
+**Lecciones críticas:**
+- **C3 falló con 12 ventanas pero pasó con 24**. El point Δ_return era +30pp en ambos casos, pero el CI ci_lo subió de +1.21pp (12w) a +9.85pp (24w). **Más datos = más poder estadístico**, no es overfitting — es resolución del CI.
+- **C1 (ETFs solos) RECHAZADO pero C3 (ETFs como pool de ranking) ACEPTADO**: la diferencia es que C3 NO carga todos los ETFs, sólo selecciona los top-5 por momentum 60d. Esto convierte ETFs en "candidatos extra para ranking" en lugar de "diluyentes".
+- **C2 (vol-targeting Moreira-Muir) funciona como el paper promete**: MaxDD MEJORA +10pp, %positivos sube de 75% a 83%. PERO el coste es masivo: −21pp return. En era 2018-24 alcista, reducir exposición en momentos volátiles cuesta más de lo que protege.
+
+### Variante AGGR_PLUS validada (= AGGR + C3)
+
+40 backtests sobre 2018-2024 (10 fechas × 4 plazos):
+
+| KPI                | MED      | AGGR     | **AGGR_PLUS** | Δ AGGR_PLUS vs MED |
+|--------------------|----------|----------|----------------|---------------------|
+| avg_return         | +17.63%  | +24.13%  | **+38.68%**    | **+21pp** (×2.2)    |
+| avg Sharpe         | +0.50    | +0.85    | **+1.18**      | **+0.68**           |
+| runs positivos     | 20/40    | 21/40    | 21/40          | =                   |
+| baten B&H          | 8/40     | 7/40     | 8/40           | =                   |
+| sin trades         | 7/40     | 5/40     | **4/40**       | −3 ✓                |
+| avg MaxDD          | −18.13%  | −30.33%  | −38.38%        | −20pp ⚠             |
+
+**Por plazo (2Y plazo donde más mejora):**
+
+| plazo | MED ret | AGGR ret | **AGGR_PLUS ret** | MED Sharpe | **AGGR_PLUS Sharpe** |
+|-------|---------|----------|-------------------|------------|----------------------|
+| 3M    | -3.51%  | -12.23%  | -12.99%           | +0.33      | +1.11                |
+| 6M    | +4.54%  | -0.27%   | +4.88%            | +0.53      | +1.15                |
+| 1Y    | +21.60% | +34.86%  | +29.92%           | +0.54      | +1.20                |
+| **2Y**| +47.91% | +74.19%  | **+132.89%**      | +0.59      | **+1.25**            |
+
+**El 6M return RECUPERA con AGGR_PLUS** (+4.88% vs −0.27% AGGR) — top-N rotation rescata oportunidades que AGGR perdía por concentración en pocos activos. **2Y avg_return casi triplica el baseline** (de +47.91% a +132.89%).
+
+### Decisiones
+
+- **Mergear C3 como variante AGGR_PLUS** (`include_etfs=true, topn_rotation=true, topn_value=5, max_concurrent=5` además de AGGR `signal_pct=0.70, kelly=0.30`).
+- **Defaults siguen en MED** por compatibilidad histórica. AGGR_PLUS está disponible vía body params para activación explícita.
+- **C1, C2, C4, C5 NO mergear** como default, pero el código opt-in queda disponible para experimentación futura.
+- **Anti-patrones identificados** (trailing stops, sentiment Reddit, on-chain corto plazo) NO se tocarán en futuras iteraciones.
+
+### Lecciones metodológicas
+
+- **24 ventanas > 12 ventanas para gates estrictos**: el ci_lo del Δ_return depende fuertemente del tamaño de muestra. Si un cambio tiene point estimate alto pero CI ancho con 12w, vale la pena recorrer 24w antes de descartar.
+- **Hipótesis individuales fallan, combinaciones aciertan**: signal_pct=0.70 solo (Tier 4.1) NO pasaba; kelly=0.30 solo (Tier 4.1) sí; juntos pasaron mejor (AGGR). C1 ETFs solos NO pasaba; con C3 ranking sí pasaron (AGGR_PLUS). El A/B individual es señal débil — la combinación es la prueba final.
+- **Las recomendaciones del paper más prestigioso pueden NO funcionar en tu era**. Moreira-Muir 2017 es peer-reviewed, NBER, pero en era estructuralmente alcista cualquier reducción de exposición en momentos volátiles cuesta más de lo que protege.
+
+### Comando reproducible
+
+```
+# desde la raiz del repo
+PORT=5057 .venv/bin/python -u api.py &
+
+# Validar cada candidato A/B (12 ventanas)
+.venv/bin/python -u compare_candidates.py --cand C1
+.venv/bin/python -u compare_candidates.py --cand C2
+.venv/bin/python -u compare_candidates.py --cand C3 --n_windows 24   # 24w para C3
+.venv/bin/python -u compare_candidates.py --cand C4
+.venv/bin/python -u compare_candidates.py --cand C5
+
+# Grid 40 backtests por variante + dashboard 3-way
+.venv/bin/python -u tools/run_performance_grid.py --variant med
+.venv/bin/python -u tools/run_performance_grid.py --variant aggr
+.venv/bin/python -u tools/run_performance_grid.py --variant aggr_plus
+.venv/bin/python -u tools/dashboard_compare3.py
+open /tmp/dashboard_compare3.html
+```

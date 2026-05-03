@@ -67,9 +67,19 @@ MED_BASE = {
 # Tier 4.1 — variante AGGR validada en compare_aggressive.py 12 ventanas
 AGGR_BASE = {**MED_BASE, 'signal_percentile': 0.70, 'kelly_scale': 0.30}
 
+# Tier 4.2 — AGGR_PLUS = AGGR + C3 top-N rotation con ETFs como pool extendido,
+# validado en compare_candidates.py --cand C3 --n_windows 24:
+# Δ_Sharpe +0.181 [+0.119,+0.247] sig, Δ_return +35.34pp [+9.85,+62.99] sig.
+AGGR_PLUS = {**AGGR_BASE,
+             'include_etfs': True,        # universo a 15 (10 + 5 ETFs)
+             'topn_rotation': True,       # ranking por momentum 60d
+             'topn_value': 5,
+             'max_concurrent': 5}
+
 VARIANT_CONFIGS = {
-    'med':  ('MED_NOLLM',         MED_BASE,  '/tmp/perf_grid_result.json'),
-    'aggr': ('AGGR_KELLY_PCT',    AGGR_BASE, '/tmp/perf_grid_aggr_result.json'),
+    'med':       ('MED_NOLLM',         MED_BASE,  '/tmp/perf_grid_result.json'),
+    'aggr':      ('AGGR_KELLY_PCT',    AGGR_BASE, '/tmp/perf_grid_aggr_result.json'),
+    'aggr_plus': ('AGGR_PLUS_C3',      AGGR_PLUS, '/tmp/perf_grid_aggr_plus_result.json'),
 }
 
 

@@ -2116,6 +2116,20 @@ def paper_autonomous_backtest():
     regime_adx_min_override = body.get('regime_adx_min')   # None ⇒ usa default cfg
     max_concurrent = int(body.get('max_concurrent', 3))
     debug_filter_counts = bool(body.get('debug_filter_counts', False))
+    # Tier 4.2 — candidatos C2-C5 (todos opt-in, default off).
+    # C2: vol-targeting portfolio-level (Moreira-Muir 2017): escala size por
+    # target_vol_annual / realized_vol_portfolio_20d. Acota [0.3, 2.0].
+    enable_vol_target_overlay = bool(body.get('enable_vol_target_overlay', False))
+    vol_target_overlay_annual = float(body.get('vol_target_overlay_annual', 0.20))
+    # C4: volatility filter — skip candidato si vol_anual fuera de [min, max]
+    vol_filter_min = body.get('vol_filter_min')   # None ⇒ no aplica
+    vol_filter_max = body.get('vol_filter_max')
+    # C5: mean-reversion combo — operar MR (RSI<10) cuando ADX < mr_adx_max
+    enable_mr_combo = bool(body.get('enable_mr_combo', False))
+    mr_adx_max      = float(body.get('mr_adx_max', 18.0))
+    # C3: top-N cross-sectional rotation — solo entrar top-N por momentum z-score
+    topn_rotation = bool(body.get('topn_rotation', False))
+    topn_value    = int(body.get('topn_value', 5))
     # Tier 2.3: bull/bear debate + judge (3× llamadas LLM por decisión).
     # Cache trimestral existente amortiza el coste. Off por default — el
     # gate del harness Tier 1.1 decide su valor neto.
@@ -2195,12 +2209,25 @@ def paper_autonomous_backtest():
     logger.info(f"=== Autonomous multi-asset backtest [{mode.upper()}]: {start_date}→{end_date} cap=${init_cap:,.0f} ===")
 
     try:
+        # Tier 4.2 C1: opcional añadir ETFs sectoriales/factor para diversificar
+        # el cluster tech (AAPL/MSFT/NVDA correlación >0.7 entre ellos). XLE/XLF
+        # baja correlación con tech, GLD anticíclico, MTUM factor momentum,
+        # IWM small-cap. Total +5 activos → 15 en universo. Default: off.
+        include_etfs = bool(body.get('include_etfs', False))
         watchlist = (
             [('AAPL', 'stock'), ('MSFT', 'stock'), ('NVDA', 'stock'),
              ('TSLA', 'stock'), ('AMZN', 'stock'), ('GOOGL', 'stock')] +
             [('BTC-USD', 'crypto'), ('ETH-USD', 'crypto'),
              ('SOL-USD', 'crypto'), ('BNB-USD', 'crypto')]
         )
+        if include_etfs:
+            watchlist += [
+                ('XLE',  'stock'),  # energy sector — baja corr con tech
+                ('XLF',  'stock'),  # financials — baja corr con tech
+                ('GLD',  'stock'),  # gold — anticíclico
+                ('MTUM', 'stock'),  # momentum factor — diversifica con tilt momentum
+                ('IWM',  'stock'),  # small-cap Russell 2000 — diversificación size
+            ]
 
         loader    = FinancialDataLoader()
         processor = DataProcessor()
@@ -2748,9 +2775,19 @@ def paper_autonomous_backtest():
                             if debug_filter_counts: filter_counts['golden_cross'] += 1
                             continue
                     # Filtro ADX (tendencia mínima requerida)
+                    # Tier 4.2 C5: MR combo — si enable_mr_combo y ADX bajo (lateral)
+                    # PERO RSI<30 (oversold), permitir entrada como mean-reversion.
+                    # RobotWealth + Price Action Lab: RSI<30 en mercado lateral con
+                    # SMA200 alcista tiene edge documentado.
                     if d['adx'] is not None and d['adx'] < cfg.regime_adx_min:
-                        if debug_filter_counts: filter_counts['adx_filter'] += 1
-                        continue
+                        rsi_val = d.get('rsi')
+                        mr_pass = (enable_mr_combo
+                                   and direc == 'LONG'
+                                   and d['adx'] < mr_adx_max
+                                   and rsi_val is not None and rsi_val < 30)
+                        if not mr_pass:
+                            if debug_filter_counts: filter_counts['adx_filter'] += 1
+                            continue
                     # Filtro de crash: evitar LONG tras caída >5% en 5 días
                     if cfg.regime_crash_filter and direc == 'LONG':
                         sorted_sym_dates = sorted(k for k in dm if k <= ds)
@@ -2786,11 +2823,28 @@ def paper_autonomous_backtest():
                             llm_stats['vetoed'] += 1
                             continue
                         llm_dec_for_sizing = ld if isinstance(ld, dict) else None
-                    candidates.append((ss, sym, d, direc, llm_dec_for_sizing))
+                    # ── Tier 4.2 C3: cross-sectional momentum 60d para ranking ──
+                    mom60 = 0.0
+                    if topn_rotation:
+                        sorted_d = sorted(k for k in dm if k <= ds)
+                        if len(sorted_d) >= 61:
+                            p_now = d['close']
+                            p_60  = dm[sorted_d[-61]]['close']
+                            if p_60 > 0:
+                                mom60 = (p_now / p_60 - 1.0)
+                    candidates.append((ss, sym, d, direc, llm_dec_for_sizing, mom60))
 
-                # Tomar las top-N señales más fuertes
-                candidates.sort(key=lambda x: x[0], reverse=True)
-                for ss, sym, bday, direc, llm_dec in candidates[:n_slots]:
+                # ── Tier 4.2 C3: ranking
+                #   default → por signal strength (ss)
+                #   topn_rotation → por momentum 60d desc, tomar top-N
+                if topn_rotation:
+                    candidates.sort(key=lambda x: x[5], reverse=True)
+                    effective_slots = min(n_slots, topn_value)
+                    candidates = candidates[:topn_value]
+                else:
+                    candidates.sort(key=lambda x: x[0], reverse=True)
+                    effective_slots = n_slots
+                for ss, sym, bday, direc, llm_dec, _mom60 in candidates[:effective_slots]:
                     stop_pct = (cfg.atr_stop_mult * bday['atr']) / max(bday['close'], 1e-8)
                     # ── Tier 3.3: hybrid confidence (ml_weight × ml_conf + (1-w) × llm_conf) ──
                     # Sólo si LLM activo y devolvió confidence_continuous. La
@@ -2810,6 +2864,21 @@ def paper_autonomous_backtest():
                     rel_str  = min(ss / max(threshold, 1e-9), 3.0)
                     vol_sc   = float(np.clip(cfg.target_vol / max(bday['volatility'], 0.05), 0.3, 2.0))
                     size_pct = min(kelly * rel_str * cfg.kelly_scale * vol_sc, cfg.max_position_pct)
+                    # ── Tier 4.2 C2: vol-target overlay portfolio-level (Moreira-Muir 2017) ──
+                    if enable_vol_target_overlay and len(equity_vals) >= 21:
+                        # realized portfolio vol annualizada de los últimos 20d
+                        eq_arr = np.array(equity_vals[-21:], dtype=float)
+                        log_rets = np.diff(np.log(eq_arr + 1e-10))
+                        realized_vol = float(np.std(log_rets) * np.sqrt(252))
+                        if realized_vol > 0.001:
+                            overlay_mult = float(np.clip(
+                                vol_target_overlay_annual / realized_vol, 0.3, 2.0))
+                            size_pct = min(size_pct * overlay_mult, cfg.max_position_pct)
+                    # ── Tier 4.2 C4: volatility filter — skip si fuera del rango ──
+                    if vol_filter_min is not None and bday['volatility'] < float(vol_filter_min):
+                        continue
+                    if vol_filter_max is not None and bday['volatility'] > float(vol_filter_max):
+                        continue
                     # ── Tier 1.3: aplicar caps + vol-target overlay del risk_gate ──
                     if risk_gate is not None:
                         eq_now = equity_vals[-1] if equity_vals else cfg.initial_capital
