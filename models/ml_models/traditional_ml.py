@@ -700,15 +700,23 @@ class VolatilityPredictor:
         
         X = df_features[feature_cols].values
         y = df_features['target_vol'].values
-        
-        # Escalar
-        X_scaled = self.scaler.fit_transform(X)
-        
-        # Dividir temporalmente
+
+        # Anti-leakage: dividimos temporalmente ANTES de escalar y ajustamos el
+        # scaler SOLO con train; el bloque de test se transforma con esos params.
         split_idx = int(len(X) * 0.8)
-        X_train, X_test = X_scaled[:split_idx], X_scaled[split_idx:]
+        X_train = self.scaler.fit_transform(X[:split_idx])
+        X_test = self.scaler.transform(X[split_idx:])
         y_train, y_test = y[:split_idx], y[split_idx:]
-        
+
+        # El target es hist_vol_20.shift(-20): cada fila mira 20 días al futuro,
+        # por lo que las últimas 20 filas de train se solapan con el bloque de test.
+        # Aplicamos un embargo recortando esas filas para evitar leakage temporal.
+        EMBARGO = 20
+        # Guarda: solo aplicamos el embargo si queda train suficiente; con
+        # datasets muy pequeños recortar 20 filas dejaría el train casi vacío.
+        if len(X_train) > EMBARGO + 10:
+            X_train, y_train = X_train[:-EMBARGO], y_train[:-EMBARGO]
+
         # Entrenar modelos
         models = {
             'rf': RandomForestRegressor(n_estimators=100, random_state=42),
