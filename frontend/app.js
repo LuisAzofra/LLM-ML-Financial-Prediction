@@ -1107,9 +1107,16 @@ function buildAnalysisExplanation(data) {
     }
   });
 
-  const scoreBound = hybrid.score >= 0.3 ? 'above +0.3 → Buy signal' : hybrid.score <= -0.3 ? 'below -0.3 → Sell signal' : 'between -0.3 and +0.3 → Hold';
+  // Pesos reales del backend (default 75/25); umbrales reales de _compute_hybrid_score.
+  const mlW  = Math.round((hybrid.ml_weight  ?? 0.75) * 100);
+  const llmW = Math.round((hybrid.llm_weight ?? 0.25) * 100);
+  const scoreBound = hybrid.score > 0.4 ? 'above +0.4 → Strong Buy'
+    : hybrid.score > 0.15 ? 'between +0.15 and +0.4 → Buy'
+    : hybrid.score < -0.4 ? 'below −0.4 → Strong Sell'
+    : hybrid.score < -0.15 ? 'between −0.4 and −0.15 → Sell'
+    : 'between −0.15 and +0.15 → Hold';
   const conflictNote = hybrid.direction_conflict
-    ? `<p style="margin-top:0.5rem;color:var(--warning)">⚠ <strong>Direction conflict detected:</strong> the ML model and LLM agents disagreed on direction. The recommendation was automatically capped at MANTENER to avoid a false Buy/Sell signal.</p>`
+    ? `<p style="margin-top:0.5rem;color:var(--warning)">⚠ <strong>Direction conflict detected:</strong> the ML model and LLM agents disagreed on direction, so the hybrid score was reduced by 40% and its confidence by 20%. The signal is dampened, not vetoed — a strong enough ML signal can still produce a Buy/Sell.</p>`
     : '';
 
   return `
@@ -1141,8 +1148,8 @@ function buildAnalysisExplanation(data) {
     ${row('Confidence', `${confPct}%`)}
     ${row('Signal logic', scoreBound)}
     ${row('Recommendation', recTag(hybrid.recommendation))}
-    <p style="margin-top:0.5rem">The hybrid score blends the <strong>ML ensemble return prediction</strong> (60% weight, scaled to [-1, 1]) with the <strong>LLM agent consensus</strong> (40% weight). A score above <strong>+0.3</strong> triggers a Buy; below <strong>−0.3</strong> a Sell; otherwise Hold.</p>
-    <p style="margin-top:0.35rem"><strong>Direction-consistency rule:</strong> if the ML model and LLM agents predict opposite directions, the recommendation is automatically capped at MANTENER — the system will never say BUY when the price projection is downward.</p>
+    <p style="margin-top:0.5rem">The hybrid score blends the <strong>ML ensemble return prediction</strong> (${mlW}% weight, scaled to [-1, 1]) with the <strong>LLM agent consensus</strong> (${llmW}% weight). A score above <strong>+0.15</strong> triggers a Buy (<strong>+0.4</strong> → Strong Buy); below <strong>−0.15</strong> a Sell (<strong>−0.4</strong> → Strong Sell); otherwise Hold.</p>
+    <p style="margin-top:0.35rem"><strong>Direction-disagreement penalty:</strong> if the ML model and LLM agents predict opposite directions, the hybrid score is reduced by 40% and its confidence by 20% — a soft penalty, not a hard veto: a sufficiently strong ML signal can still pass through.</p>
     ${conflictNote}
 
     <p class="modal-note">⚠️ This is a research model for educational purposes. Past predictions are not a guarantee of future results. Always apply your own judgement before making financial decisions.</p>
@@ -1176,7 +1183,7 @@ function buildBacktestExplanation(data) {
     ${row('Direction correct?', correct ? tag('YES — direction matched', 'pos') : tag('NO — direction wrong', 'neg'))}
     ${row('Return prediction error', (accuracy?.return_error_pct ?? 0).toFixed(2) + '%')}
     ${row('Accuracy rating', tag(accuracy?.return_error_rating || '—', accuracy?.return_error_rating === 'EXCELLENT' ? 'pos' : accuracy?.return_error_rating === 'GOOD' ? 'warn' : 'neg'))}
-    <p style="margin-top:0.5rem">The chart shows the model's <span style="color:var(--accent-teal)">predicted price path</span> (a linear projection from entry price to target) against the <span style="color:var(--text-primary)">actual recorded price path</span> for the same period.</p>
+    <p style="margin-top:0.5rem">The chart shows the model's <span style="color:var(--accent-teal)">predicted price path</span> (the median of a 2,000-run Monte Carlo simulation whose daily drift blends the ML signal with historical momentum, weighted by model confidence) against the <span style="color:var(--text-primary)">actual recorded price path</span> for the same period.</p>
 
     <p class="modal-note">⚠️ Backtesting has inherent limitations. A model can perform well historically and still fail going forward due to changing market regimes. This tool is for educational analysis only.</p>
   `;
