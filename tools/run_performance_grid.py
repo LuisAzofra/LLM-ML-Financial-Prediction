@@ -34,6 +34,16 @@ HORIZONS = [
     ('2Y', 730),
 ]
 
+# Tier 5: plazos cortos para evaluar la variante SWING. Usados solo cuando
+# `--variant swing` o `--include-short`. NO se mezclan con HORIZONS por
+# defecto para no inflar runtime de los grids existentes (40 → 80 backtests).
+HORIZONS_SHORT = [
+    ('1W',  7),
+    ('2W', 14),
+    ('1M', 30),
+    ('2M', 60),
+]
+
 # Fechas representativas: 2 puntos en cada año entre 2018-2023.
 # Cubre: pre-COVID (2019), crash (2020-Q1), bull recovery (2020-Q3),
 # bull peak (2021), bear (2022), recovery (2023).
@@ -82,6 +92,26 @@ VARIANT_CONFIGS = {
     'aggr_plus': ('AGGR_PLUS_C3',      AGGR_PLUS, '/tmp/perf_grid_aggr_plus_result.json'),
 }
 
+# Tier 5: variante SWING (mode='swing', holding 1-14d, ATR stop ON, conf
+# floor exit). Hereda AGGR_PLUS (signal_pct=0.70, kelly=0.30, ETFs, topN
+# rotation) y le añade los flags swing.
+SWING_BASE = {**AGGR_PLUS,
+              'mode': 'swing',
+              'max_holding_days_swing': 14,
+              'min_holding_days_swing': 1,
+              'conf_floor': 0.50}
+# AMPLIO: SWING + universo broad_random (test sesgo + corto plazo a la vez)
+SWING_BROAD_42 = {**SWING_BASE,
+                  'universe_mode': 'broad_random',
+                  'universe_seed': 42,
+                  'universe_size_stocks': 30,
+                  'universe_size_crypto': 20}
+
+VARIANT_CONFIGS['swing']       = ('SWING_DYNAMIC',  SWING_BASE,
+                                  '/tmp/perf_grid_swing_result.json')
+VARIANT_CONFIGS['swing_broad'] = ('SWING_BROAD_42', SWING_BROAD_42,
+                                  '/tmp/perf_grid_swing_broad_result.json')
+
 
 def call(start_date: str, end_date: str, body_base: dict) -> dict:
     body = {**body_base, 'start_date': start_date, 'end_date': end_date}
@@ -121,21 +151,32 @@ def add_days(date_str: str, n: int) -> str:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--variant', choices=list(VARIANT_CONFIGS.keys()), default='med',
-                        help='med (default, baseline) o aggr (Tier 4.1)')
+                        help='med (default, baseline), aggr (Tier 4.1), aggr_plus (Tier 4.2), '
+                             'swing (Tier 5), swing_broad (Tier 5 + universo broad)')
+    parser.add_argument('--include-short', action='store_true',
+                        help='Tier 5: añade plazos cortos (1W/2W/1M/2M) a la grid. '
+                             'Auto-on para variantes swing*.')
     args = parser.parse_args()
     variant_label, body_base, out_path = VARIANT_CONFIGS[args.variant]
+
+    # Tier 5: swing y swing_broad usan automáticamente plazos cortos. Cualquier
+    # variante puede pedirlos con --include-short.
+    use_short = args.include_short or args.variant.startswith('swing')
+    horizons_eff = (HORIZONS_SHORT + HORIZONS) if use_short else list(HORIZONS)
 
     today = datetime.now().date()
     runs = []
     skipped = []
 
-    print(f"Grid: {len(START_DATES)} fechas × {len(HORIZONS)} plazos = {len(START_DATES)*len(HORIZONS)} backtests")
+    print(f"Grid: {len(START_DATES)} fechas × {len(horizons_eff)} plazos = "
+          f"{len(START_DATES)*len(horizons_eff)} backtests "
+          f"({'incl. cortos' if use_short else 'plazos largos'})")
     print(f"Variante: {variant_label}  config={body_base}")
     print()
 
     for sd in START_DATES:
         sd_dt = datetime.strptime(sd, '%Y-%m-%d').date()
-        for h_label, h_days in HORIZONS:
+        for h_label, h_days in horizons_eff:
             end_dt = sd_dt + timedelta(days=h_days)
             if end_dt > today:
                 skipped.append((sd, h_label, 'fin futuro'))
@@ -162,7 +203,7 @@ def main():
         by_h.setdefault(r['horizon'], []).append(r)
 
     summary_by_horizon = []
-    for h_label, _ in HORIZONS:
+    for h_label, _ in horizons_eff:
         rs = by_h.get(h_label, [])
         if not rs:
             continue
@@ -204,7 +245,7 @@ def main():
     out = {
         'generated_at': datetime.now().isoformat(timespec='seconds'),
         'variant': variant_label,
-        'horizons': [(l, d) for l, d in HORIZONS],
+        'horizons': [(l, d) for l, d in horizons_eff],
         'start_dates': START_DATES,
         'config': body_base,
         'runs': runs,

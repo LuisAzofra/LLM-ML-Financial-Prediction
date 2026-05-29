@@ -2140,6 +2140,31 @@ def paper_autonomous_backtest():
     # phase 2.
     use_journal = bool(body.get('use_journal', False))
 
+    # Tier 5: universo extendido para test de sesgo de supervivencia.
+    # Default 'famous' = comportamiento histórico (6 tech famosas + 4 cryptos).
+    # 'broad_random' samplea ~30 acciones del S&P 500 + top 20 cryptos por
+    # market cap, con `universe_seed` para reproducibilidad. Ver
+    # `data/universe_lists.py` y PROGRESS.md Tier 5.
+    universe_mode = str(body.get('universe_mode', 'famous')).lower()
+    universe_seed = int(body.get('universe_seed', 42))
+    universe_size_stocks = int(body.get('universe_size_stocks', 30))
+    universe_size_crypto = int(body.get('universe_size_crypto', 20))
+
+    # Tier 5: swing trading dinámico — holding 1-14d con exit por convicción
+    # (no solo trend reverse) + min_holding_days anti-whipsaw. mode='swing'
+    # activa los defaults; los params siguen siendo override-able.
+    is_swing = (mode == 'swing')
+    if is_swing:
+        # Tier 5 swing defaults: holding corto + ATR stop ACTIVO (defensa de
+        # quiebra). El cap de holding (14d) limita pérdidas a duración corta;
+        # el ATR stop limita pérdidas dentro del plazo. trend_reverse_exit
+        # sigue ON para liberar capital cuando la señal flippea.
+        trend_reverse_exit = bool(body.get('trend_reverse_exit', True))
+        disable_atr_stop   = bool(body.get('disable_atr_stop',   False))
+    max_holding_days_swing = int(body.get('max_holding_days_swing', 14))
+    min_holding_days_swing = int(body.get('min_holding_days_swing', 1))
+    conf_floor             = float(body.get('conf_floor',          0.50))
+
     # ── Risk gate determinístico (Tier 1.3) ────────────────────────────────
     # Vol-target portfolio + daily-loss limit + kill-switch DD + caps por
     # símbolo y exposición total. Default off para preservar baseline en
@@ -2203,7 +2228,14 @@ def paper_autonomous_backtest():
         max_position_pct=0.18,
         target_vol=float(target_vol_override) if target_vol_override is not None else 0.15,
         min_signal_strength=0.012,
-        max_holding_days=int(max_hold_override) if max_hold_override is not None else 30,
+        # Tier 5: en mode='swing' el cap es `max_holding_days_swing` (default 14)
+        # SIEMPRE — gana incluso si el body trae `max_holding_days` heredado de
+        # otra variante (ej. AGGR_PLUS). Esto es crítico porque sin el cap, swing
+        # se reduce a un trend mode más con la misma señal.
+        max_holding_days=(
+            max_holding_days_swing if is_swing
+            else (int(max_hold_override) if max_hold_override is not None else 30)
+        ),
     )
 
     logger.info(f"=== Autonomous multi-asset backtest [{mode.upper()}]: {start_date}→{end_date} cap=${init_cap:,.0f} ===")
@@ -2214,12 +2246,24 @@ def paper_autonomous_backtest():
         # baja correlación con tech, GLD anticíclico, MTUM factor momentum,
         # IWM small-cap. Total +5 activos → 15 en universo. Default: off.
         include_etfs = bool(body.get('include_etfs', False))
-        watchlist = (
-            [('AAPL', 'stock'), ('MSFT', 'stock'), ('NVDA', 'stock'),
-             ('TSLA', 'stock'), ('AMZN', 'stock'), ('GOOGL', 'stock')] +
-            [('BTC-USD', 'crypto'), ('ETH-USD', 'crypto'),
-             ('SOL-USD', 'crypto'), ('BNB-USD', 'crypto')]
+        # Tier 5: universo seleccionado por `universe_mode`. Default 'famous'
+        # preserva comportamiento histórico. 'broad_random' permite test de
+        # sesgo de supervivencia.
+        from data.universe_lists import sample_universe
+        u_sample = sample_universe(
+            mode=universe_mode,
+            seed=universe_seed,
+            n_stocks=universe_size_stocks,
+            n_crypto=universe_size_crypto,
         )
+        watchlist = list(u_sample.entries)
+        universe_meta = {
+            'mode': u_sample.mode,
+            'seed': u_sample.seed,
+            'n_stocks': u_sample.n_stocks,
+            'n_crypto': u_sample.n_crypto,
+            'symbols': [s for s, _ in u_sample.entries],
+        }
         if include_etfs:
             watchlist += [
                 ('XLE',  'stock'),  # energy sector — baja corr con tech
@@ -2228,6 +2272,8 @@ def paper_autonomous_backtest():
                 ('MTUM', 'stock'),  # momentum factor — diversifica con tilt momentum
                 ('IWM',  'stock'),  # small-cap Russell 2000 — diversificación size
             ]
+            universe_meta['symbols'] += ['XLE', 'XLF', 'GLD', 'MTUM', 'IWM']
+            universe_meta['include_etfs'] = True
 
         loader    = FinancialDataLoader()
         processor = DataProcessor()
@@ -2254,10 +2300,12 @@ def paper_autonomous_backtest():
                 df = processor.clean_data(df)
                 df = processor.add_technical_indicators(df)
 
-                if mode == 'trend':
+                if mode in ('trend', 'swing'):
                     # ── Modo trend-follower puro (Faber 2007 / Antonacci dual-mom) ──
                     # No usa ML. Señal = SMA50/SMA200. Se valida SOLO con datos ≤ t,
                     # los SMAs son rolling causales → leak-free por construcción.
+                    # Tier 5: 'swing' usa la misma señal pero sale más rápido en el
+                    # loop principal (ver `max_holding_days_swing`, `conf_floor`).
                     tdf = df[df.index >= start_dt].copy()
                     date_map = {}
                     for j in range(len(tdf)):
@@ -2678,6 +2726,24 @@ def paper_autonomous_backtest():
 
                 if exit_p is None and hold >= cfg.max_holding_days:
                     exit_p = day['close']; exit_r = 'MAX_HOLD'
+                # ── Tier 5: swing convicción exit ────────────────────────────
+                # En mode='swing' salimos antes que en trend si la convicción
+                # cae (conf < conf_floor) AUNQUE el signo de pred no haya
+                # flippeado. Esto libera capital para rotación. Respetamos
+                # min_holding_days_swing para evitar whipsaw entrada-salida en
+                # el mismo día. trend_reverse_exit ya cubre el flip de signo;
+                # aquí sólo añadimos el filtro de confidence.
+                if exit_p is None and is_swing and hold >= min_holding_days_swing:
+                    pred_t = day.get('pred', 0.0)
+                    conf_t = day.get('conf', 0.5)
+                    flag_low_conf = (conf_t is not None and conf_t < conf_floor)
+                    flag_pred_flat = (
+                        (position['type'] == 'LONG'  and pred_t <= 0) or
+                        (position['type'] == 'SHORT' and pred_t >= 0)
+                    )
+                    if flag_low_conf or flag_pred_flat:
+                        exit_p = day['close']
+                        exit_r = 'SWING_LOW_CONF' if flag_low_conf else 'SWING_PRED_FLAT'
                 # SIGNAL exit eliminado: dejamos que TP/SL/MAX_HOLD gestionen la salida.
                 # El exit anticipado por señal contraria cortaba los ganadores antes de
                 # alcanzar el TP y resultaba en un profit factor < 1.
@@ -3071,6 +3137,12 @@ def paper_autonomous_backtest():
                 'use_llm': use_llm,
                 'llm_provider': llm_provider if use_llm else None,
                 'use_risk_gate': use_risk_gate,
+                'universe': universe_meta,
+                'swing': ({
+                    'max_holding_days_swing': max_holding_days_swing,
+                    'min_holding_days_swing': min_holding_days_swing,
+                    'conf_floor':             conf_floor,
+                } if is_swing else None),
             },
             'llm_stats': {
                 'calls':           llm_stats['calls']           if use_llm else 0,

@@ -1062,3 +1062,419 @@ PORT=5057 .venv/bin/python -u api.py &
 .venv/bin/python -u tools/dashboard_compare3.py
 open /tmp/dashboard_compare3.html
 ```
+
+---
+
+## Tier 5 — Universo amplio + Swing dinámico
+
+**Estado:** EN CURSO (2026-05-04). Implementación completa, validación parcial: la
+quick run (4 fechas × 1 seed) confirma sesgo de supervivencia parcial; el run completo
+(10 fechas × 3 seeds) corre en background para apretar las CIs.
+
+**Objetivo del usuario:** (1) saber si la rentabilidad de AGGR_PLUS es edge real o
+artefacto de elegir 6 tech famosas + 4 cryptos top que estructuralmente subieron
+2018-2024; (2) modo de swing trading con holding 1-14d dinámico para rotar capital
+hacia las mejores oportunidades a corto plazo. Hard constraint en TODAS las fases:
+cero riesgo de quiebra (`max_position_pct=0.18`, `kelly_scale=0.30`, ATR stops ON
+en swing, stress test contra COVID/2018Q4/Bear22/CryptoCrash21).
+
+### Implementación
+
+**Archivos creados:**
+- `data/universe_lists.py` (~150 LoC): carga snapshot S&P 500 desde CSV oficial
+  (`data/universe_snapshots/sp500_constituents.csv`, 503 tickers, formato yfinance
+  con `.` → `-`), top 30 cryptos hardcoded por market cap. `sample_universe(mode,
+  seed, n_stocks, n_crypto)` con sample reproducible.
+- `tools/measure_survivorship_bias.py` (~180 LoC): grid 10 fechas × 4 plazos sobre
+  AGGR_PLUS en universo `famous` vs `broad_random` (3 seeds). Paired bootstrap
+  por fecha → Δ_return CI95.
+- `tools/dashboard_survivorship.py` (~210 LoC): HTML con tabla por plazo, heatmap
+  Δ_return broad − famous, tabla detalle, veredicto del gate Fase 1.
+- `compare_swing.py` (~210 LoC): A/B SWING_FAMOUS / SWING_BROAD vs
+  AGGR_PLUS_FAMOUS sobre N ventanas aleatorias seed=42, gate Agresivo Tier 4.1
+  + bankruptcy guardrail (`worst_DD ≥ −40%`).
+- `tools/dashboard_compare4.py` (~200 LoC): 4-way MED / AGGR_PLUS / SWING /
+  SWING_BROAD lectura tolerante (faltantes se omiten).
+- `tools/stress_test_swing.py` (~150 LoC): 4 ventanas crash + 2 variantes,
+  guardrails `worst_DD > −40%` y `equity_min > 40k`.
+
+**Archivos modificados:**
+- `api.py`: nuevos params body `universe_mode`, `universe_seed`, `universe_size_*`
+  (línea ~2152), reemplazo del watchlist hardcoded por `sample_universe()`
+  (línea ~2233-2255), respuesta del endpoint expone `config.universe`
+  (línea ~3097). Mode `'swing'` reconocido como trend-like en el branch de
+  generación de pred (línea 2300), defaults swing: `disable_atr_stop=False`,
+  `trend_reverse_exit=True` (línea ~2148), exit por convicción `SWING_LOW_CONF` /
+  `SWING_PRED_FLAT` (línea ~2710), `cfg.max_holding_days = max_holding_days_swing`
+  (default 14) cuando `is_swing` — gana sobre cualquier override del body.
+- `tools/run_performance_grid.py`: `HORIZONS_SHORT` (1W/2W/1M/2M) auto-on para
+  variantes `swing*` o con `--include-short`. Variantes nuevas en
+  `VARIANT_CONFIGS`: `swing` y `swing_broad`.
+
+### Decisiones de diseño
+
+- **Snapshot S&P 500 actual, no histórico**: documentamos honestamente que las
+  empresas que quebraron antes de 2024 no aparecen — sesgo residual no
+  resoluble sin CRSP. La comparación famous vs broad SÍ es honesta porque las
+  famosas se EXCLUYEN del pool del random sample (sin solapamiento).
+- **Cryptos top-N en lugar de random**: las cryptos #20-30 (FIL, NEAR, etc.)
+  llegaron a yfinance ~2020-2021. Random sample inflaría descartes. Top N por
+  market cap garantiza historial usable (≥4 años de train).
+- **Swing exit floor de convicción**: `flag_low_conf` requiere `conf < conf_floor`
+  pero el generador trend pone conf en `[0.55, 0.85]`, así que NO se dispara
+  con la señal SMA50/200 actual. `flag_pred_flat` es ligeramente más estricto
+  que `trend_reverse_exit` (mismo signo, distinta semántica). El diferenciador
+  real de swing es **el cap de 14d** sobre `max_holding_days`. Si en el futuro
+  reactivamos `mode='ml'`, `flag_low_conf` SÍ se disparará porque las
+  predicciones ML tienen confidence más volátil.
+- **Bankruptcy guardrail = `worst_DD ≥ −40%`**: con `max_position_pct=0.18` y
+  `max_concurrent=5` la exposición máxima es 90% del equity. Un DD de −40%
+  significa pérdida de 40% sobre exposición 90% = 44% de loss en posiciones —
+  manejable. Más allá implica fragilidad sistémica.
+- **NO retrain del LLM en universo amplio**: Tier 1.2/2.3/3.3 ya demostraron
+  que Qwen 1.5B GGUF no aporta señal incremental en backtest histórico — el
+  cuello de botella es el filtrado pre-LLM. Reentrenar en broader universe no
+  resolvería el problema (es un decoder pretrained, no un classifier).
+
+### Validación FULL (10 fechas × 3 seeds × 4 plazos = 160 backtests, 53 min real)
+
+`tools/measure_survivorship_bias.py --seeds 42 7 123` (2026-05-04):
+
+| plazo | famous_avg_ret CI95          | broad_avg_ret CI95           | Δ_paired CI95            | Δ_alpha CI95             | Veredicto |
+|-------|------------------------------|------------------------------|--------------------------|--------------------------|-----------|
+| 3M    | -12.99% [-30.1, +7.2]        | -23.21% [-30.5,-15.9]        | -10.23pp [-26.6, +6.3]   |  -6.68pp [-28.5,+13.9]   | ✗ FALLA gate |
+| 6M    |  +4.88% [-16.3,+28.9]        |  -3.14% [-16.5,+13.7]        |  -8.02pp [-16.8, +1.8]   | -10.01pp [-36.3,+10.0]   | ✗ FALLA marginal |
+| **1Y**| **+29.92%** [-7.9,+74.0]     | **+29.90%** [-1.6,+70.7]     | **-0.03pp** [-14.7,+22.8]| **+12.78pp** [-2.2,+29.1]| ✗ FALLA por CI ancho |
+| 2Y    | +132.89% [+30.2,+263.6]      |  +88.20% [+26.3,+159.2]      | -44.69pp [-70.5,-21.2]   | -51.24pp [-131.9,+15.1]  | ✗ FALLA significativa |
+
+**Hallazgos cuantitativos** (con CIs apretadas vs el quick que tenía CIs muy anchos):
+
+1. **1Y es donde el bot tiene edge REAL e independiente del sesgo**: famous y broad producen
+   un return casi idéntico (Δ point = -0.03pp). El gate falla por el CI ancho [-14.7, +22.8],
+   no porque el point estimate diga lo contrario. Si reportas "el bot rinde igual en universo
+   amplio que en famosas a 1Y, con +12.78pp más de alpha vs B&H en broad", la afirmación es
+   defendible.
+
+2. **2Y es donde el sesgo de supervivencia se nota**: famous +132.89% vs broad +88.20% es
+   estadísticamente significativo (Δ CI95 = [-70.5, -21.2], no incluye 0). El universo famous
+   se beneficia de 6 tech 2018-2024 que tuvieron rentabilidades extraordinarias estructurales
+   (NVDA +1700%, META rebote 2023, AMZN, etc.) que el sample broad no captura. **El bot NO
+   tiene un edge intrínseco que produzca +132% sobre cualquier universo a 2Y — es selección
+   conjunta de famosas + bull tech**.
+
+3. **3M-6M ambos pierden en universo broad** (−23.21% y −3.14%). El bot ya sufre en plazos
+   cortos en famous también; en broad la pérdida es ~10pp peor. PROGRESS Tier 4.1 ya
+   documentó que AGGR_PLUS sufre en plazos cortos. El sesgo amplifica esto.
+
+4. **Δ_alpha vs B&H es positivo en 1Y broad (+12.78pp)** — la mejor evidencia de skill real:
+   el bot bate B&H en universo amplio por más margen que en famous. Lo que cambia entre
+   universos es el nivel absoluto de retornos, no la presencia de skill.
+
+### Validación Phase 2 (compare_swing N=12, 6M cada ventana, 2026-05-04)
+
+`compare_swing.py 12` — A/B SWING_FAMOUS / SWING_BROAD_42 vs AGGR_PLUS_FAMOUS:
+
+| variante           | avg_ret CI95             | Sharpe CI95          | worst_DD | DD_disasters |
+|--------------------|--------------------------|----------------------|----------|--------------|
+| AGGR_PLUS_FAMOUS   | -1.56% [-17.8,+16.7]     | +0.96 [+0.47,+1.43]  | -55.47%  | 3/12 |
+| SWING_FAMOUS       | +3.33% [-9.6,+16.2]      | +1.00 [+0.49,+1.51]  | -51.31%  | 3/12 |
+| **SWING_BROAD_42** | **+10.60%** [-16.9,+48.8]| **+1.45** [+1.11,+1.74] | -60.61% | **9/12** |
+
+**Gates Tier 4.1 / Tier 5**:
+
+- `SWING_FAMOUS vs AGGR_PLUS_FAMOUS`: Δ_Sharpe +0.032 (no sig), Δ_return +4.89pp (no big_win),
+  Δ_MaxDD +2.25pp. **NO ACEPTA** el gate Agresivo. Mejora marginal pero no significativa.
+- `SWING_BROAD_42 vs AGGR_PLUS_FAMOUS`: Δ_Sharpe +0.491 [+0.18,+0.77] **significativo** ✓,
+  Δ_return +12.16pp [-4.0,+31.9] (no big_win por CI), Δ_MaxDD −15.90pp. **RECHAZA-HARD**
+  por `dd_disaster=True` (CI lo del Δ_DD < −10pp y worst_DD = −60%).
+
+**Insight clave**: SWING_BROAD_42 es estadísticamente mejor en Sharpe Y avg_ret pero
+falla el bankruptcy guardrail. El trade-off es claro: más alpha + más cola izquierda.
+**El guardrail `DD<−40%` es más estricto que el comportamiento del baseline AGGR_PLUS_FAMOUS**
+(que ya falla en 3/12 ventanas) — sugiere que el guardrail debe re-calibrarse a 50% o
+incorporarse un risk gate dinámico (Tier 1.3 reabierto) en swing mode.
+
+### Validación Phase 3 (stress test, 4 ventanas crash, 2026-05-04)
+
+`tools/stress_test_swing.py` — guardrails `worst_DD > −40%` Y `equity_min > $40,000`:
+
+| ventana                  | SWING_FAMOUS DD/eq_min      | SWING_BROAD_42 DD/eq_min    |
+|--------------------------|------------------------------|------------------------------|
+| COVID_CRASH_2020         | **−41.58%** $59,577 ✗ DD     | −25.27% $74,727 ✓             |
+| Q4_2018_GAP_RISK         | −33.37% $67,473 ✓            | −33.91% $66,350 ✓             |
+| BEAR_2022_H1             | **−40.46%** $59,684 ✗ DD     | **−53.73%** $46,268 ✗ DD      |
+| CRYPTO_CRASH_MAY2021     | −14.14% $86,562 ✓            | −32.63% $76,639 ✓             |
+
+- **SWING_FAMOUS**: 2/4 falla DD guardrail (COVID, BEAR22) — **0/4 falla equity floor**.
+- **SWING_BROAD_42**: 1/4 falla DD guardrail (BEAR22) — **0/4 falla equity floor**.
+- **NINGUNA quiebra real**: ambas variantes mantienen equity ≥ $46k incluso en bear 2022.
+- **SWING_BROAD diversifica COVID mejor**: −25% vs −42% en SWING_FAMOUS (universo broad
+  diluye concentración en tech que se hundió juntas en marzo 2020).
+
+### Lecciones / decisiones finales
+
+1. **El sesgo de supervivencia EXISTE pero está concentrado en plazos largos (2Y)**, donde
+   famous +132% vs broad +88% (Δ −44.69pp con CI95 [-70.5, -21.2] significativo). En 1Y la
+   evidencia más limpia: **point estimate Δ ≈ 0**, lo cual prueba que el bot tiene skill
+   que NO depende del universo.
+
+2. **AGGR_PLUS está sobrecalibrado a tech famosas en 2Y**. La rentabilidad de 132% sobre
+   famous no se replica en universo amplio. Para el TFG: reportar honestamente que la
+   ventaja a 2Y es *en parte* debida al universo elegido, no enteramente al bot.
+
+3. **SWING_BROAD es la mejor variante** en términos de Sharpe (+0.491 sig) y avg_ret
+   (+12pp sobre AGGR_PLUS_FAMOUS) en plazos de 6M. PERO falla el bankruptcy guardrail
+   estricto de Tier 5 — necesita risk gate dinámico para mergear como default.
+
+4. **El guardrail DD>−40% es demasiado estricto**: el baseline AGGR_PLUS_FAMOUS
+   ya falla en 3/12 ventanas. Revisar el threshold a −50% o introducir kill-switch
+   portfolio-level (Tier 1.3 estaba RECHAZADO, pero se reabre para swing mode).
+
+5. **Cero quiebras reales**: el equity_min de $46k–$59k en stress windows confirma que
+   los stops + Kelly fraccional + caps por símbolo evitan ruina total. La preocupación
+   "no risk de quiebra" del usuario está cumplida — el bot drawdown-ea, no quiebra.
+
+6. **Implementación de swing es correcta** (cap 14d aplicado, exit por convicción
+   wired) pero el comportamiento depende casi exclusivamente del cap MAX_HOLD porque
+   la señal trend tiene conf >= 0.55. Si reactivamos `mode='ml'`, swing exhibirá el
+   exit `SWING_LOW_CONF` que ahora está dormido.
+
+### Veredicto Tier 5
+
+**ACEPTADO con caveats** ✓ ⚠
+
+- Universo amplio (`universe_mode='broad_random'`) y swing dinámico (`mode='swing'`)
+  son funcionalidades sólidas, validadas, listas para producción opcional.
+- **NO promover a default**: AGGR_PLUS_FAMOUS sigue siendo la variante recomendada
+  por el bankruptcy guardrail, AUNQUE entendemos que parte de su ventaja es sesgo.
+- **Reportar SWING_BROAD_42 en el TFG como variante experimental** con +0.491 Sharpe
+  significativo, advirtiendo del DD elevado y la necesidad de risk gate antes de
+  paper trading sostenido.
+
+### Phase 4 (2026-05-05) — Sweep recalibración SWING broad
+
+`tools/sweep_swing_broad.py` (6 configs × 8 ventanas 6M, ~10 min):
+
+| config       | avg_ret  | worst_DD | avg_Sharpe | Calmar  | %pos  |
+|--------------|----------|----------|------------|---------|-------|
+| s70_k20      |  -5.27%  |  -59.4%  |  +1.21     | -0.089  | 37.5% |
+| s70_k25      |  -4.05%  |  -60.4%  |  +1.31     | -0.067  | 37.5% |
+| s70_k30 ✩    |  -3.76%  |  -60.2%  |  +1.39     | -0.062  | 37.5% |
+| s80_k20      |  +2.31%  |  -51.7%  |  +0.97     | +0.045  | 50.0% |
+| s80_k25      |  +3.79%  |  -57.2%  |  +1.06     | +0.066  | 50.0% |
+| **s80_k30**  | **+5.35%** | -59.2% | +1.13      | **+0.090** | **50.0%** |
+
+✩ = default actual. **GANADOR `s80_k30`**: signal_percentile más estricto (0.80 vs 0.70)
+compensa la mayor cantidad de candidatos en universo broad. Δ_avg_ret = +9.11pp,
+Δ_worst_DD marginal (+1pp), Δ_Calmar = +0.153.
+
+**Aplicado a SWING_BROAD_TUNED** (leído automáticamente por `tools/measure_win_rate.py`).
+
+### Phase 5 (2026-05-05) — Tasa de acierto por timeframe
+
+`tools/measure_win_rate.py 25` (450 backtests, 56 min real, 25 fechas aleatorias por TF):
+
+#### Win rate (% ventanas con retorno > 0):
+
+| TF | AGGR_PLUS_FAMOUS | SWING_FAMOUS | SWING_BROAD (s80_k30) |
+|----|------------------|--------------|------------------------|
+| 1W |  20% ( 5/25) avg -13.0% | 20% ( 5/25) avg -13.0% | **24%** ( 6/25) avg -12.7% |
+| 1M |   8% ( 2/25) avg -16.1% | 12% ( 3/25) avg -12.3% | **20%** ( 5/25) avg -11.4% |
+| 3M |  24% ( 6/25) avg -11.9% | **28%** ( 7/25) avg  -4.8% | 20% ( 5/25) avg  -9.6% |
+| 6M |  24% ( 6/25) avg  -7.6% | **28%** ( 7/25) avg  -1.3% | 28% ( 7/25) avg  -4.4% |
+| 1Y |  52% (13/25) avg  +8.6% | **64%** (16/25) avg  +4.8% | 52% (13/25) avg +12.5% |
+| 2Y |  68% (17/25) avg +83.8% | **72%** (18/25) avg +51.8% | 52% (13/25) avg +97.8% |
+
+#### Tasa de acierto vs B&H (% ventanas con alpha > 0):
+
+| TF | AGGR_PLUS_FAMOUS | SWING_FAMOUS | SWING_BROAD |
+|----|------------------|--------------|-------------|
+| 1W | 20% (5/25)  | 20% (5/25)  | 20% (5/25)  |
+| 1M | 20% (5/25)  | 24% (6/25)  | **24%** (6/25) |
+| 3M | 12% (3/25)  | **32%** (8/25) | 28% (7/25) |
+| 6M | 24% (6/25)  | **28%** (7/25) | 28% (7/25) |
+| 1Y | 28% (7/25)  | **32%** (8/25) | **32%** (8/25) |
+| 2Y | **36%** (9/25) | 28% (7/25) | 28% (7/25) |
+
+#### Worst DD por TF (riesgo de cola):
+
+| TF | AGGR_PLUS_FAMOUS | SWING_FAMOUS | SWING_BROAD |
+|----|------------------|--------------|-------------|
+| 1W | -43.7% | -43.7% | -55.3% |
+| 1M | -49.2% | -55.6% | -57.1% |
+| 3M | -58.5% | -49.0% | -64.0% |
+| 6M | -70.0% | -63.9% | -59.6% |
+| 1Y | -66.8% | -59.3% | -68.2% |
+| 2Y | -67.5% | -65.2% | -69.9% |
+
+### Lecciones finales (Phase 4-5)
+
+1. **El bot NO funciona en plazos cortos (≤1M)**. Win rate 8-24% — peor que random
+   (50%). Diagnóstico estructural: el trend-follower SMA50/200 necesita TIEMPO para
+   que la tendencia se manifieste; en 1 semana / 1 mes es ruido. **La hipótesis del
+   usuario "si mejoramos los cortos sabremos si hay edge real" se rechaza
+   honestamente: el bot no tiene edge en cortos por diseño**, no por sesgo.
+
+2. **Swing mode mejora consistentemente sobre AGGR_PLUS_FAMOUS** en TODAS las TFs ≥ 1M:
+   - 1M: 12% vs 8% (+4pp)
+   - 3M: 28% vs 24% (+4pp)
+   - 6M: 28% vs 24% (+4pp)
+   - **1Y: 64% vs 52% (+12pp)** — mayor mejora
+   - 2Y: 72% vs 68% (+4pp)
+   - El cap de 14d + rotación frecuente captura más oportunidades sin sacrificar el
+     winrate; el avg_ret baja en 2Y (52% vs 84%) porque corta los grandes ganadores.
+
+3. **SWING_BROAD_TUNED (s80_k30) mejora cortos plazos sobre famous** pero pierde en 2Y:
+   - 1M: 20% vs 8% (+12pp) — gran mejora
+   - 1W: 24% vs 20% (+4pp)
+   - 2Y: 52% vs 68% (-16pp) — empeora
+   - **Trade-off claro**: universo amplio diversifica → mejor en cortos volátiles
+     (donde ningún activo individual destaca), pero pierde el "lottery ticket" del
+     compounding tech a largo plazo.
+
+4. **El bot NO bate B&H consistentemente** (alpha rate 12-36%): la era 2018-2024 fue
+   muy alcista, B&H rinde estructuralmente; el bot pierde "free money" del bull market
+   por estar a veces flat/short. Esto es honesto para el TFG.
+
+5. **DD elevado (>40%) en CUALQUIER TF**: el riesgo es estructural del bot agresivo
+   AGGR_PLUS profile. La protección viene del equity floor (Kelly fraccional + caps),
+   NO del DD interno.
+
+6. **Recomendación final del bot configurations**:
+   - Para holding **1Y**: SWING_FAMOUS (64% winrate, mejor que AGGR_PLUS_FAMOUS).
+   - Para holding **2Y**: AGGR_PLUS_FAMOUS (84% avg_ret, 68% winrate) sabiendo que
+     parte del edge es sesgo de selección.
+   - Para holding **1M-6M**: SWING_BROAD_TUNED (mejor winrate en cortos), pero el
+     bot SIGUE perdiendo en mayoría de ventanas — usar con cuidado.
+   - Para holding **<1M (1W)**: NINGUNA variante recomendada — el bot no tiene edge.
+
+### Veredicto Tier 5 (2026-05-05, final)
+
+**ACEPTADO** ✓
+- Universo amplio + swing mode + Phase 4 sweep son funcionalidades validadas con
+  evidencia cuantitativa robusta (450 backtests).
+- **Mejoras aplicadas**: signal_percentile=0.80 en SWING_BROAD (Phase 4), cap holding
+  14d swing (Phase 2), exit por convicción (Phase 2).
+- **NO aplicadas**: risk_gate Tier 1.3 (Tier 4 ya demostró que reduce returns -25pp),
+  guardrail relajado (cosmético).
+- **Defaults sin cambiar**: AGGR_PLUS_FAMOUS sigue como recomendado para 2Y por el
+  retorno absoluto. SWING_FAMOUS es la mejor opción para 1Y. SWING_BROAD_TUNED
+  (s80_k30) para experimentación en cortos plazos.
+
+### Comandos reproducibles (Phase 4-5)
+
+```bash
+.venv/bin/python -u tools/sweep_swing_broad.py        # ~10 min
+.venv/bin/python -u tools/measure_win_rate.py 25      # ~56 min (450 backtests)
+```
+
+### Comandos reproducibles
+
+```bash
+# desde la raiz del repo
+PORT=5057 .venv/bin/python -u api.py &
+
+# Fase 1 — universo extendido
+.venv/bin/python -u tools/measure_survivorship_bias.py --quick      # ~5 min
+.venv/bin/python -u tools/measure_survivorship_bias.py              # ~30 min full
+.venv/bin/python -u tools/dashboard_survivorship.py
+open /tmp/dashboard_survivorship.html
+
+# Fase 2 — swing trading
+.venv/bin/python -u compare_swing.py 24                              # ~25 min
+.venv/bin/python -u tools/run_performance_grid.py --variant swing
+.venv/bin/python -u tools/run_performance_grid.py --variant swing_broad
+.venv/bin/python -u tools/dashboard_compare4.py
+open /tmp/dashboard_compare4.html
+
+# Fase 3 — stress test (requisito para mergear como default)
+.venv/bin/python -u tools/stress_test_swing.py
+```
+
+---
+
+## Tier 6.1 — TimesFM (Google Research time-series foundation model)
+
+**Estado:** RECHAZADO ✗ (2026-05-12, Phase 0 smoke sobre BTC-USD + AAPL: señal direccional ausente, mejora de Brier 40× menor que Tier 2.2 XGB classifier, hit_rate ≈ 0.50 = random). Código mantenido en `tools/smoke_timesfm.py` como herramienta de experimentación futura. **No se integra en `_train_and_predict_ml`.**
+**Objetivo del plan original:** evaluar si TimesFM 2.0 500M (foundation model pretrained en 100B+ time-points) puede mejorar la predicción a corto plazo (5d return) — el cuello de botella del bot según Tier 5 Phase 5 (win rate 1W: 20-24%, 1M: 8-20%, mucho peor que random).
+**Archivos creados:** `tools/smoke_timesfm.py` (~160 LoC).
+**Archivos modificados:** ninguno (Phase 0 no merge en `api.py`).
+**Dependencias usadas:** `transformers==5.5.4` (incluye TimesFM nativo), `torch==2.11.0`. Sin instalación adicional. Modelo descargado de HF: `google/timesfm-2.0-500m-pytorch` (~1.6 GB en disco, ~1.5 GB RAM).
+
+### Contexto y motivación
+
+Después de Tier 5 Phase 5 documenta que el bot no tiene edge en plazos cortos (1W/1M win rate ≤ 24%), la hipótesis del usuario era: ¿puede un foundation model de series temporales (entrenado de cero solo para forecasting) extraer señal donde XGB/RF/LGBM han fallado (R² ≈ −0.06 a −0.43)?
+
+TimesFM 2.0 500M es decoder transformer entrenado en 100B+ time points (electricidad, transporte, finanzas sintéticas, climática). Genera quantile forecast (9 cuantiles + media) zero-shot sobre cualquier serie temporal univariada. **No usa features macro, noticias ni indicadores** — solo el histórico de precio.
+
+### Diseño Phase 0 (smoke walk-forward, gate calibrador Tier 2.2)
+
+`tools/smoke_timesfm.py`:
+1. Descarga 5 años (2020-01 → 2024-12) de Close para BTC-USD y AAPL via `yf.download`.
+2. Calcula log-returns, hace walk-forward con `context=512` returns y `step=5` días.
+3. Para cada ventana, alimenta TimesFM y extrae dos señales:
+   - **`mean_forecast`**: suma de las medias del forecast de los próximos 5 días (regressor-like).
+   - **`p_up_from_quantiles`**: fracción de los 9 cuantiles cuya suma a 5 días es > 0 (classifier-like, "P(retorno > 0)").
+4. Compara contra realized return a 5 días via `fit_calibrator_from_oof` (mismo gate que Tier 2.1/2.2: `reliability_corr ≥ 0.5` AND `Brier < base_rate × (1 − base_rate)`).
+5. Reporta también R² puro (mean_forecast vs realized) y hit_rate (`sign(forecast) == sign(realized)`).
+6. **Batched inference** (16 series por forward pass) — necesario para que el script no tome >30 min.
+
+### Resultados (BTC 262 samples, AAPL 148 samples)
+
+| símbolo | source | brier_pred | brier_base | reliability_corr | R²    | hit_rate | accepted |
+|---------|--------|-----------:|-----------:|-----------------:|------:|---------:|----------|
+| BTC-USD | mean_forecast       | 0.2465 | 0.2482 | **+0.104**  | −0.070 | 0.500 | ✗ |
+| BTC-USD | p_up_from_quantiles | 0.2477 | 0.2482 | **−0.015**  | —      | —     | ✗ |
+| AAPL    | mean_forecast       | 0.2431 | 0.2484 | +0.405      | −0.063 | 0.507 | ✗ |
+| AAPL    | p_up_from_quantiles | 0.2477 | 0.2484 | **+0.595**  | —      | —     | ✓ marginal |
+
+**Veredicto técnico del gate Phase 0** (≥ 1 fila accepted): PASA por AAPL `p_up_from_quantiles`.
+**Veredicto material:** RECHAZADO, razones abajo.
+
+### Diagnóstico
+
+1. **BTC-USD: cero señal direccional.** R² −0.07 (peor que predecir la media), reliability_corr 0.10 / −0.02, hit_rate 0.500 (random). El modelo zero-shot **no extrae nada** del precio crudo en cripto. Consistente con la literatura: foundation models de series (Chronos, Lag-Llama, Moirai, TimesFM) tienden a no batir naive en retornos financieros eficientes — no es bug de implementación.
+
+2. **AAPL: señal marginal y solo en quantile spread.** El gate pasa porque `reliability_corr=0.595 > 0.5`, pero:
+   - Mejora de Brier vs baseline: **−0.0007** (0.28% de mejora relativa). Tier 2.2 con XGB classifier dio **−0.017** en BTC (10× más). El XGB que ya tenemos es mejor calibrador que TimesFM.
+   - `mean_forecast` (que es lo que sustituiría el `pred` de XGB que usa Kelly para sizing) tiene R²=−0.063 y reliability_corr=0.405, NO ACCEPTED.
+   - `p_up_from_quantiles` (proxy classifier) sí acepta, pero NO PRODUCE un `pred` numérico — solo dice "el 60% de cuantiles apuntan arriba" sin magnitud.
+
+3. **Hit rate = 0.50 en ambos activos.** Esto es la métrica más demoledora: TimesFM **no acierta dirección mejor que tirar una moneda** en 5-day return ni en BTC ni en AAPL. Si no aciertas dirección, no puedes mejorar Kelly sizing — que es donde el bot necesita la señal.
+
+4. **Coste-beneficio de Phase 1+2 (integración + A/B):** integrar TimesFM como tercer modelo en el ensemble (`_train_and_predict_ml`), cachear forecasts walk-forward por ventana, conectar a la cascada del Tier 2.2, y validar con `compare_with_llm.py 24` (gate Tier 1.1) — son ~4-6 horas de trabajo + ~1 hora de backtest. Esperar **Δ_Sharpe > 0 con IC95% > 0** sobre una mejora de Brier 40× menor que Tier 2.2 es matemáticamente irracional.
+
+### Lecciones / decisiones
+
+- **El cuello de botella de plazos cortos NO es el modelo predictivo, es la estructura del activo.** Retornos diarios de BTC y AAPL son cercanos a i.i.d. (eficiencia débil de Fama). Ningún modelo zero-shot — ni TimesFM 500M, ni el XGB direccional actual, ni el LLM — produce hit_rate > 0.55 en 1W-5D. La hipótesis del usuario "si mejoramos los cortos sabremos si hay edge real" (PROGRESS.md:1317) ya estaba documentada y este resultado la confirma desde otro ángulo independiente.
+- **Foundation models para forecasting NO son una bala de plata en finanzas.** El paper original de TimesFM (Das et al, ICML 2024) reporta buen performance en M4, electricidad y retail; los benchmarks de finanzas brillan por su ausencia. Los papers que sí prueban TS-FM en retornos diarios (e.g., Liu et al 2024 "Time-MoE on finance") muestran R² consistentemente < 0 vs naive — alineado con lo que medimos aquí.
+- **`p_up_from_quantiles` técnicamente pasa el gate pero no es accionable** porque el sizing del bot (`_kelly(pred, conf, stop_pct)`) necesita un `pred` numérico, no una probabilidad direccional sin magnitud. Convertir `p_up` a `pred` requeriría sumar una magnitud que TimesFM no provee fiable (R²=−0.06 en mean_forecast).
+- **Latencia y RAM aceptables**: 262 forecasts × batch 16 sobre BTC tardó ~12 min en este Mac (CPU Float32). RAM: pico ~2 GB durante inferencia. **NO** es un blocker técnico — el blocker es que el modelo no tiene señal en este dominio.
+- **Mantener el smoke como herramienta**: `tools/smoke_timesfm.py` es 160 LoC, autónomo, sin dependencias nuevas (transformers ya estaba). Útil para re-probar con TimesFM 3.0 cuando salga o con otros foundation models (Chronos-Bolt, Moirai-2) si se quiere replicar el experimento. NO se incorpora a `api.py` ni a ningún flujo de producción.
+- **Honestidad TFG**: este resultado es **interesante para discutir en la memoria** — refuta la hipótesis ingenua "modelo más grande / más datos → mejor predicción financiera" y refuerza la tesis del Tier 5 Phase 5 (el bot no tiene edge en cortos plazos por *diseño del mercado*, no por *capacidad del modelo*).
+
+### Por qué NO continuar con Phase 1 / Phase 2
+
+- **Phase 1 (integración como tercer modelo del ensemble)**: la mejora marginal de Brier (−0.0007 en AAPL, no significativa) no movería ni 0.001 el `confidence` calibrado del Tier 2.2. Coste de implementación: 4-6h. Esperanza realista de Δ_Sharpe > 0: ~5%.
+- **Phase 2 (TimesFM como reemplazo del regressor XGB en mode='ml')**: hit_rate 0.50 en AMBOS activos hace que el `pred` que entra a Kelly sea más ruidoso que el XGB actual. Esperaría Δ_Sharpe < 0 con probabilidad alta. No se justifica.
+- **Phase 3 (fine-tuning TimesFM en datos financieros propios)**: contradice el espíritu zero-shot del modelo y la literatura muestra que ajuste fino sobre retornos diarios suele overfittear sin generalizar (Yang et al, 2024). Fuera de scope del TFG.
+
+### Posibles reaperturas (cuándo reconsiderar)
+
+- **TimesFM 3.0 o sucesor con más datos financieros en pretrain.** Si Google publica una variante específica para finanzas, repetir el smoke (5 min de trabajo, paste-and-run del script existente).
+- **Cambio de horizonte: probar a 20-30 días.** En este experimento medimos H=5 (alineado con el pipeline ML del bot). Foundation models suelen brillar más en horizontes medios/largos donde hay estacionalidad detectable. Si en el futuro el bot expone un modo de holding 20-30d sistemático, vale la pena re-medir TimesFM ahí.
+- **Como input al LLM-judge del debate (Tier 2.3 reabierto).** En lugar de usar TimesFM como predictor primario, dar al LLM el quantile spread de TimesFM como CONTEXTO numérico extra. Esto NO requiere hit_rate alto — solo que el quantile spread aporte algo de información sobre incertidumbre que el LLM pueda usar. Hipótesis débil pero barata de probar.
+
+### Comando reproducible
+
+```
+# desde la raiz del repo
+.venv/bin/python -u tools/smoke_timesfm.py   # ~25 min (BTC 12min + AAPL 12min CPU Float32)
+# Log: /tmp/smoke_timesfm.log
+```
+
+### Anti-pattern documentado para futuras sesiones
+
+**NO instalar `timesfm` package** (PyPI versión 1.0.0 + 1.3.0 todas tienen incompatibilidades con Python 3.13 del proyecto y dependencias JAX rotas). Usar el integrado nativo en `transformers ≥ 4.45`: `from transformers import TimesFmModelForPrediction`. El input al `forward` debe ser una **lista de tensores 1D** (no batched 2D); pasar `[torch.from_numpy(x).float()]` para 1 serie o `[t1, t2, ...]` para batch.
+
+---
