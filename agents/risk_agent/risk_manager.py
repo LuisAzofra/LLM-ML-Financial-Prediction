@@ -208,19 +208,24 @@ class RiskManagerAgent(BaseAgent):
         if len(returns) < 30:
             return RiskMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
         
-        # Value at Risk (VaR) paramétrico y histórico
-        var_95_param = -np.percentile(returns, 5)
-        var_99_param = -np.percentile(returns, 1)
-        
-        # VaR paramétrico (asumiendo normalidad)
         mean_ret = np.mean(returns)
         std_ret = np.std(returns)
-        var_95 = max(var_95_param, -(mean_ret - 1.645 * std_ret))
-        var_99 = max(var_99_param, -(mean_ret - 2.326 * std_ret))
-        
-        # Conditional VaR (CVaR) / Expected Shortfall
-        cvar_95 = -returns[returns <= -var_95].mean() if any(returns <= -var_95) else var_95
-        cvar_99 = -returns[returns <= -var_99].mean() if any(returns <= -var_99) else var_99
+
+        # VaR histórico/empírico (diario): pérdida positiva en el percentil de la cola.
+        # No asume normalidad, por lo que es más robusto que el paramétrico.
+        q05 = np.percentile(returns, 5)
+        q01 = np.percentile(returns, 1)
+        var_95 = -q05
+        var_99 = -q01
+
+        # CVaR / Expected Shortfall (diario): media de la cola por debajo del percentil,
+        # con el MISMO estimador empírico. Por definición CVaR >= VaR.
+        tail_95 = returns[returns <= q05]
+        tail_99 = returns[returns <= q01]
+        cvar_95 = -tail_95.mean() if tail_95.size > 0 else var_95
+        cvar_99 = -tail_99.mean() if tail_99.size > 0 else var_99
+        cvar_95 = max(cvar_95, var_95)
+        cvar_99 = max(cvar_99, var_99)
         
         # Maximum Drawdown
         cumulative = (1 + returns).cumprod()
@@ -309,10 +314,10 @@ class RiskManagerAgent(BaseAgent):
         
         concentration = proposed_value / portfolio_value if portfolio_value > 0 else 0
         
-        # VaR del portfolio (usando volatilidad predicha)
+        # VaR del portfolio (horizonte DIARIO): var_95 es el VaR empírico diario
         portfolio_var = portfolio_value * metrics.var_95
-        
-        # VaR con volatilidad GARCH
+
+        # VaR con volatilidad GARCH (horizonte DIARIO): vol anualizada -> diaria con /sqrt(252)
         portfolio_var_forecast = portfolio_value * metrics.volatility_forecast / np.sqrt(252) * 1.645
         
         return {
