@@ -5,7 +5,7 @@ Usa RSS feeds y APIs gratuitas
 import feedparser
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 import logging
 import time
@@ -77,8 +77,10 @@ class NewsFetcher:
                     continue
                 
                 logger.info(f"📰 Fetching RSS: {source}")
-                feed = feedparser.parse(feed_url)
-                
+                feed = self._parse_feed(feed_url, source)
+                if feed is None:
+                    continue
+
                 for entry in feed.entries[:max_items]:
                     news_item = self._normalize_rss_entry(entry, source)
                     
@@ -97,23 +99,58 @@ class NewsFetcher:
                 logger.warning(f"⚠️  Error fetching {source}: {e}")
                 continue
         
-        # Ordenar por fecha
-        all_news.sort(key=lambda x: x.get('published', ''), reverse=True)
-        
+        # Orden cronológico descendente dejando las noticias sin fecha al final:
+        # con reverse=True la tupla (1, fecha) precede a (0, ''), así las vacías caen al final.
+        all_news.sort(key=self._sort_key, reverse=True)
+
         logger.info(f"✅ Total noticias RSS: {len(all_news)}")
         return all_news
     
+    @staticmethod
+    def _sort_key(item: Dict):
+        """Clave de orden: (hay_fecha, fecha). Con reverse=True las noticias con
+        fecha van primero (más reciente arriba) y las sin fecha quedan al final."""
+        published = item.get('published') or ''
+        return (1 if published else 0, published)
+
+    def _parse_feed(self, url: str, source: str):
+        """
+        Descarga y parsea un feed RSS de forma robusta.
+
+        feedparser.parse(url) no aplica timeout ni lanza ante 404/timeout (deja
+        bozo=True / entries vacío), así que descargamos con la sesión (timeout=10)
+        y comprobamos status y bozo. Devuelve el feed parseado o None si falla.
+        """
+        try:
+            resp = self.session.get(url, timeout=10)
+        except Exception as e:
+            logger.warning(f"⚠️  Error de red al descargar {source} ({url}): {e}")
+            return None
+
+        if resp.status_code != 200:
+            logger.warning(f"⚠️  {source} devolvió HTTP {resp.status_code} ({url})")
+            return None
+
+        feed = feedparser.parse(resp.content)
+        if feed.bozo:
+            logger.warning(f"⚠️  Feed mal formado de {source}: {feed.get('bozo_exception')}")
+            # bozo no siempre implica feed inservible; seguimos si trae entries.
+            if not feed.entries:
+                return None
+        return feed
+
     def _normalize_rss_entry(self, entry, source: str) -> Dict:
         """Normaliza una entrada RSS al formato estándar"""
-        # Parsear fecha
-        published = entry.get('published', '')
+        # Normalizar fecha: si published_parsed existe, anclar en UTC. Si falta o
+        # falla, dejar cadena vacía — NO datetime.now(), que colocaría artificialmente
+        # la noticia al principio del orden cronológico descendente.
+        published = ''
         try:
-            if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                published_dt = datetime(*entry.published_parsed[:6])
-                published = published_dt.isoformat()
-        except:
-            published = datetime.now().isoformat()
-        
+            if getattr(entry, 'published_parsed', None):
+                published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).isoformat()
+        except Exception:
+            published = ''
+
         return {
             'title': entry.get('title', ''),
             'summary': entry.get('summary', entry.get('description', '')),
@@ -139,9 +176,11 @@ class NewsFetcher:
             url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
             logger.info(f"📰 Fetching Yahoo Finance news for {symbol}")
             
-            feed = feedparser.parse(url)
+            feed = self._parse_feed(url, 'yahoo_finance')
             news = []
-            
+            if feed is None:
+                return news
+
             for entry in feed.entries[:max_items]:
                 news.append(self._normalize_rss_entry(entry, 'yahoo_finance'))
             
@@ -170,9 +209,8 @@ class NewsFetcher:
         # CoinDesk RSS
         try:
             coindesk_feed = 'https://www.coindesk.com/arc/outboundfeeds/rss/'
-            feed = feedparser.parse(coindesk_feed)
-            
-            for entry in feed.entries[:max_items]:
+            feed = self._parse_feed(coindesk_feed, 'coindesk')
+            for entry in (feed.entries[:max_items] if feed else []):
                 item = self._normalize_rss_entry(entry, 'coindesk')
                 if coin and coin.lower() not in (item['title'] + item.get('summary', '')).lower():
                     continue
@@ -183,9 +221,8 @@ class NewsFetcher:
         # Cointelegraph RSS
         try:
             cointelegraph_feed = 'https://cointelegraph.com/rss'
-            feed = feedparser.parse(cointelegraph_feed)
-            
-            for entry in feed.entries[:max_items]:
+            feed = self._parse_feed(cointelegraph_feed, 'cointelegraph')
+            for entry in (feed.entries[:max_items] if feed else []):
                 item = self._normalize_rss_entry(entry, 'cointelegraph')
                 if coin and coin.lower() not in (item['title'] + item.get('summary', '')).lower():
                     continue
@@ -193,7 +230,7 @@ class NewsFetcher:
         except Exception as e:
             logger.warning(f"⚠️  Error fetching Cointelegraph: {e}")
         
-        news.sort(key=lambda x: x.get('published', ''), reverse=True)
+        news.sort(key=self._sort_key, reverse=True)
         logger.info(f"✅ {len(news)} noticias crypto")
         return news
     
@@ -275,8 +312,8 @@ class NewsFetcher:
         # Indicadores de sentimiento
         result['sentiment_indicators'] = self.fetch_market_sentiment_indicators()
         
-        # Ordenar y limitar
-        result['news'].sort(key=lambda x: x.get('published', ''), reverse=True)
+        # Ordenar y limitar (noticias sin fecha al final, no al principio)
+        result['news'].sort(key=self._sort_key, reverse=True)
         result['news'] = result['news'][:max_items]
         result['total_news'] = len(result['news'])
         

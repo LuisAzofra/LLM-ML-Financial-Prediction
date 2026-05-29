@@ -5,7 +5,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from typing import Optional, List, Dict, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import time
 try:
@@ -52,10 +52,14 @@ class FinancialDataLoader:
 
             # Use period1/period2 Unix timestamps — this is the ONLY way to guarantee
             # that Yahoo returns data strictly ending at end_date (no leakage for backtesting)
-            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            # Anclar las fechas en UTC explícito: un datetime naive se interpreta en
+            # hora local al hacer .timestamp(), desplazando el rango según la TZ del host.
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
             p1 = int(start_dt.timestamp())
-            p2 = int(end_dt.timestamp())
+            # period2 es cota superior EXCLUSIVA en la API de Yahoo; sumar 1 día para
+            # incluir la barra de end_date.
+            p2 = int((end_dt + timedelta(days=1)).timestamp())
 
             # URL to Yahoo API v8 with explicit date range
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={p1}&period2={p2}&interval={api_interval}"
@@ -89,8 +93,26 @@ class FinancialDataLoader:
                 logger.warning(f"No se encontraron datos para {symbol} tras reintentos")
                 return pd.DataFrame()
 
-            result = data['chart']['result'][0]
-            timestamps = result['timestamp']
+            # Yahoo devuelve {'chart': {'result': None, 'error': {...}}} ante símbolos
+            # inválidos o rangos sin datos; acceder a [0] directamente enmascararía el
+            # fallo con un TypeError/KeyError. Validamos de forma controlada.
+            chart = data.get('chart', {})
+            api_error = chart.get('error')
+            if api_error:
+                logger.warning(f"Yahoo reportó error para {symbol}: {api_error}")
+                return pd.DataFrame()
+
+            results = chart.get('result')
+            if not results or results[0] is None:
+                logger.warning(f"Sin datos para {symbol} (símbolo o rango {start_date}→{end_date} sin resultados)")
+                return pd.DataFrame()
+
+            result = results[0]
+            timestamps = result.get('timestamp')
+            if not timestamps:
+                logger.warning(f"Sin barras (timestamp) para {symbol} en {start_date}→{end_date}")
+                return pd.DataFrame()
+
             quote = result['indicators']['quote'][0]
 
             # Convert arrays to pandas DataFrame
@@ -226,9 +248,14 @@ class CryptoDataLoader:
             end_date: Fecha fin 'YYYY-MM-DD'
             timeframe: Intervalo ('1d', '4h', '1h', etc.)
         """
+        # Sin ccxt no hay exchange: evitar AttributeError al llamar fetch_ohlcv.
+        if self.exchange is None:
+            logger.warning("ccxt no disponible: download_crypto_data devuelve DataFrame vacío")
+            return pd.DataFrame()
+
         try:
             logger.info(f"Descargando datos de {symbol}...")
-            
+
             # Convertir fechas a timestamps
             since = int(datetime.strptime(start_date, '%Y-%m-%d').timestamp() * 1000)
             
@@ -275,6 +302,11 @@ class CryptoDataLoader:
         """
         Obtiene lista de principales criptomonedas por capitalización
         """
+        # Sin ccxt no hay exchange: evitar AttributeError al llamar load_markets.
+        if self.exchange is None:
+            logger.warning("ccxt no disponible: get_top_cryptos devuelve lista vacía")
+            return []
+
         try:
             markets = self.exchange.load_markets()
             # Filtrar pares USDT
