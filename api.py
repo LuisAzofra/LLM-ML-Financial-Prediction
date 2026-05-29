@@ -2631,6 +2631,7 @@ def paper_autonomous_backtest():
 
         capital     = cfg.initial_capital
         positions   = {}   # sym → position_dict (múltiples posiciones simultáneas)
+        last_close  = {}
         equity_vals = [capital]
         equity_dts  = [all_dates[0]]
         all_trades  = []
@@ -2997,10 +2998,13 @@ def paper_autonomous_backtest():
             for sym, pos in positions.items():
                 if sym in asset_maps and ds in asset_maps[sym]:
                     cp = asset_maps[sym][ds]['close']
-                    if pos['type'] == 'LONG':
-                        port_val += pos['shares'] * cp
-                    else:
-                        port_val += pos['cost_basis'] - pos['shares'] * cp
+                    last_close[sym] = cp
+                else:
+                    cp = last_close.get(sym, pos['entry_price'])
+                if pos['type'] == 'LONG':
+                    port_val += pos['shares'] * cp
+                else:
+                    port_val += pos['cost_basis'] - pos['shares'] * cp
             equity_vals.append(port_val)
             equity_dts.append(ds)
             active_syms_history[ds] = list(positions.keys())
