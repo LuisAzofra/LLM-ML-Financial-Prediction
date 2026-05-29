@@ -456,57 +456,10 @@ class HybridTradingSystem:
             return hybrid_result
         
         return ml_predictions
-    
-    def backtest(self, df: pd.DataFrame, initial_capital: float = 100000) -> Dict:
-        """
-        Ejecuta backtesting del sistema híbrido
-        """
-        logger.info("=" * 60)
-        logger.info("BACKTESTING DEL SISTEMA HÍBRIDO")
-        logger.info("=" * 60)
-        
-        # Implementación simplificada de backtesting
-        portfolio_value = [initial_capital]
-        trades = []
-        
-        # Entrenar modelo inicial
-        train_size = int(len(df) * 0.3)
-        
-        for i in range(train_size, len(df) - 1):
-            # Usar datos hasta i para predicción
-            historical_data = df.iloc[:i]
-            
-            # Predicción simplificada
-            prediction = np.random.choice([-1, 0, 1])  # Placeholder
-            
-            # Simular operación
-            if prediction == 1:  # Comprar
-                returns = df['Close'].iloc[i+1] / df['Close'].iloc[i] - 1
-                portfolio_value.append(portfolio_value[-1] * (1 + returns))
-            elif prediction == -1:  # Vender
-                returns = -(df['Close'].iloc[i+1] / df['Close'].iloc[i] - 1)
-                portfolio_value.append(portfolio_value[-1] * (1 + returns))
-            else:
-                portfolio_value.append(portfolio_value[-1])
-        
-        # Calcular métricas
-        returns = pd.Series(portfolio_value).pct_change().dropna()
-        
-        metrics = {
-            'total_return': (portfolio_value[-1] - initial_capital) / initial_capital,
-            'sharpe_ratio': returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0,
-            'max_drawdown': (np.maximum.accumulate(portfolio_value) - portfolio_value).max() / np.maximum.accumulate(portfolio_value).max(),
-            'volatility': returns.std() * np.sqrt(252),
-            'n_trades': len([t for t in trades if t != 0])
-        }
-        
-        logger.info(f"\n📊 Resultados del backtest:")
-        logger.info(f"   Retorno total: {metrics['total_return']*100:.2f}%")
-        logger.info(f"   Sharpe Ratio: {metrics['sharpe_ratio']:.2f}")
-        logger.info(f"   Max Drawdown: {metrics['max_drawdown']*100:.2f}%")
-        
-        return {
-            'metrics': metrics,
-            'portfolio_value': portfolio_value,
-            'trades': trades
-        }
+
+    # NOTA: se elimino el metodo backtest() de esta clase. Generaba senales con
+    # np.random.choice (placeholder) y aplicaba retornos de Close[i+1] (look-ahead),
+    # por lo que sus metricas eran ruido y no representaban al sistema. El backtest
+    # canonico, realista (slippage, comisiones, intraday, walk-forward) vive en
+    # `trading_bot/bot_engine.py` (AutonomousTradingBot) y en el endpoint
+    # `/api/paper/autonomous-backtest` de api.py. Usa esos en su lugar.
