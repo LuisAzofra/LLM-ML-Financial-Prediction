@@ -11,6 +11,7 @@ import numpy as np
 import logging
 from datetime import datetime, timedelta
 import os
+import re
 import sys
 import time
 import warnings
@@ -65,7 +66,10 @@ else:
 # Flask app
 # ──────────────────────────────────────────────
 app = Flask(__name__, static_folder='frontend', static_url_path='')
-CORS(app)
+# El frontend lo sirve este mismo Flask (mismo origen), asi que no hace falta
+# CORS abierto. Lo restringimos a localhost para no exponer endpoints que mutan
+# la cartera (paper/execute, paper/reset, ...) a cualquier web.
+CORS(app, origins=[re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")])
 
 TIMEFRAME_MAP = {
     '1m': 30,
