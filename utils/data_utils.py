@@ -184,10 +184,15 @@ class DataProcessor:
         critical_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         df = df.dropna(subset=[col for col in critical_cols if col in df.columns])
         
-        # Rellenar valores nulos en otras columnas numéricas con interpolación
+        # Rellenar valores nulos en otras columnas numéricas con interpolación.
+        # limit_direction='forward' (no 'both'): rellenar hacia atrás usaría valores
+        # FUTUROS (look-ahead bias) y contaminaría el backtest.
         numeric_cols = df.select_dtypes(include=[np.number]).columns
-        df[numeric_cols] = df[numeric_cols].interpolate(method='linear', limit_direction='both')
-        
+        df[numeric_cols] = df[numeric_cols].interpolate(method='linear', limit_direction='forward')
+        # La interpolación forward no cubre NaN iniciales; se descartan esas filas
+        # en vez de rellenarlas con datos del futuro (backfill).
+        df = df.dropna(subset=list(numeric_cols))
+
         final_rows = len(df)
         logger.info(f"Limpieza: {initial_rows} -> {final_rows} filas")
         
@@ -338,29 +343,37 @@ class DataProcessor:
         logger.info("Indicadores técnicos añadidos")
         return df
     
-    def normalize_features(self, df: pd.DataFrame, columns: List[str], 
-                          method: str = 'minmax') -> pd.DataFrame:
+    def normalize_features(self, df: pd.DataFrame, columns: List[str],
+                          method: str = 'minmax', fit_size: int = None) -> pd.DataFrame:
         """
-        Normaliza las características especificadas
+        Normaliza las características especificadas.
+
+        AVISO leakage: si se normaliza ANTES de partir en train/test, calcular
+        las estadísticas sobre todo el df filtra información del test (look-ahead
+        bias). Pasa fit_size = nº de filas de train para ajustar min/max o
+        mean/std solo con df.iloc[:fit_size] y evitarlo.
         """
         df = df.copy()
-        
+        # Solo las primeras fit_size filas (train) definen las estadísticas; si es
+        # None se mantiene el comportamiento original (todo el df) por compatibilidad.
+        fit_df = df.iloc[:fit_size] if fit_size is not None else df
+
         for col in columns:
             if col not in df.columns:
                 continue
-                
+
             if method == 'minmax':
-                min_val = df[col].min()
-                max_val = df[col].max()
+                min_val = fit_df[col].min()
+                max_val = fit_df[col].max()
                 df[col] = (df[col] - min_val) / (max_val - min_val)
                 self.scaler_params[col] = {'min': min_val, 'max': max_val, 'method': 'minmax'}
-                
+
             elif method == 'zscore':
-                mean_val = df[col].mean()
-                std_val = df[col].std()
+                mean_val = fit_df[col].mean()
+                std_val = fit_df[col].std()
                 df[col] = (df[col] - mean_val) / std_val
                 self.scaler_params[col] = {'mean': mean_val, 'std': std_val, 'method': 'zscore'}
-        
+
         return df
     
     def create_sequences(self, data: np.ndarray, seq_length: int, 

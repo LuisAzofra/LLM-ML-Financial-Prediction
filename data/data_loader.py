@@ -113,8 +113,13 @@ class FinancialDataLoader:
 
             # Clean up
             df.dropna(subset=['Close'], inplace=True)
+            # Solo ffill: el bfill rellenaría huecos con valores FUTUROS (look-ahead
+            # bias) y contaminaría el backtest. Se elimina deliberadamente.
             df.ffill(inplace=True)
-            df.bfill(inplace=True)
+            # ffill no cubre NaN al inicio de columnas != Close; se descartan esas
+            # filas en vez de rellenarlas con datos del futuro.
+            ohlc_cols = [c for c in ['Open', 'High', 'Low', 'Close'] if c in df.columns]
+            df.dropna(subset=ohlc_cols, inplace=True)
 
             logger.info(f"Descargados {len(df)} registros de {symbol} (Yahoo JSON API)")
             return df
