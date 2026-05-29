@@ -153,11 +153,18 @@ class SentimentAnalystAgent(BaseAgent):
             for i, item in enumerate(news_items[:10])  # Analizar top 10
         ])
         
+        # Casting numérico seguro: el LLM puede devolver strings o tipos raros
+        def _to_float(x, default):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return default
+
         # Analizar con LLM
         try:
             llm_result = self.llm_client.analyze_sentiment(combined_text)
             parsed = llm_result.get('parsed', {})
-            
+
             # Convertir sentimiento a score numérico
             sentiment_map = {
                 'bullish': 1.0,
@@ -166,21 +173,19 @@ class SentimentAnalystAgent(BaseAgent):
                 'negative': -0.7,
                 'bearish': -1.0
             }
-            
+
             sentiment_str = parsed.get('sentiment', 'neutral').lower()
-            score = parsed.get('score', sentiment_map.get(sentiment_str, 0))
-            confidence = parsed.get('confidence', 0.5)
-            
-            # Contar noticias positivas/negativas
-            positive_count = sum(1 for s in [score] if s > 0.2)
-            negative_count = sum(1 for s in [score] if s < -0.2)
-            
+            # No fiarse del formato del LLM: castear y acotar a rangos válidos
+            # (un modelo pequeño puede devolver score=5, "0.5" o confidence=1.5)
+            score = _to_float(parsed.get('score', sentiment_map.get(sentiment_str, 0)), 0.0)
+            score = float(np.clip(score, -1.0, 1.0))
+            confidence = _to_float(parsed.get('confidence', 0.5), 0.5)
+            confidence = float(np.clip(confidence, 0.0, 1.0))
+
             return {
                 'score': score,
                 'confidence': confidence,
                 'sentiment': sentiment_str,
-                'positive_count': positive_count,
-                'negative_count': negative_count,
                 'key_points': parsed.get('key_points', []),
                 'reasoning': parsed.get('reasoning', ''),
                 'llm_raw_response': llm_result.get('text', '')
@@ -267,14 +272,21 @@ class SentimentAnalystAgent(BaseAgent):
             'market': 0.3
         }
         
-        scores = []
-        confidences = []
-        
+        # Acumulamos suma ponderada y el peso de las fuentes realmente presentes.
+        # Normalizar por la suma de pesos usados (no por el total fijo) evita
+        # atenuar el resultado cuando falta alguna fuente (p. ej. solo noticias).
+        weighted_score_sum = 0.0
+        weighted_confidence_sum = 0.0
+        weight_used = 0.0
+        any_source = False
+
         # Noticias
         if news.get('confidence', 0) > 0:
-            scores.append(news['score'] * weights['news'])
-            confidences.append(news['confidence'] * weights['news'])
-        
+            weighted_score_sum += news['score'] * weights['news']
+            weighted_confidence_sum += news['confidence'] * weights['news']
+            weight_used += weights['news']
+            any_source = True
+
         # Indicadores de mercado
         if 'fear_greed' in market:
             fgi = market['fear_greed']
@@ -290,16 +302,17 @@ class SentimentAnalystAgent(BaseAgent):
                 market_score = -0.8
             else:
                 market_score = 0
-            
-            scores.append(market_score * weights['market'])
-            confidences.append(0.6 * weights['market'])
-        
-        if not scores:
+
+            weighted_score_sum += market_score * weights['market']
+            weighted_confidence_sum += 0.6 * weights['market']
+            weight_used += weights['market']
+            any_source = True
+
+        if not any_source or weight_used <= 0:
             return {'score': 0, 'confidence': 0, 'interpretation': 'NEUTRAL'}
-        
-        total_weight = sum(weights.values())
-        aggregated_score = sum(scores) / total_weight
-        aggregated_confidence = sum(confidences) / total_weight
+
+        aggregated_score = weighted_score_sum / weight_used
+        aggregated_confidence = weighted_confidence_sum / weight_used
         
         return {
             'score': aggregated_score,
