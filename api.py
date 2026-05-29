@@ -3068,9 +3068,11 @@ def paper_autonomous_backtest():
         eq_arr       = np.array(equity_vals, dtype=float)
         daily_rets   = np.diff(eq_arr) / (eq_arr[:-1] + 1e-8)
         sharpe       = (np.mean(daily_rets) / (np.std(daily_rets) + 1e-10)) * np.sqrt(252) if len(daily_rets) > 1 else 0.0
-        # Sortino: penaliza solo la volatilidad bajista
-        neg_rets     = daily_rets[daily_rets < 0]
-        down_std     = float(np.std(neg_rets)) if len(neg_rets) > 1 else 1e-10
+        # Sortino: penaliza solo la volatilidad bajista.
+        # Downside deviation = sqrt(mean(min(r - MAR, 0)^2)) sobre TODOS los retornos
+        # con MAR = 0; se anualiza con sqrt(252) igual que el Sharpe -> comparables.
+        down_diff    = np.minimum(daily_rets, 0.0)
+        down_std     = float(np.sqrt(np.mean(down_diff ** 2))) if len(daily_rets) > 1 else 0.0
         sortino      = (np.mean(daily_rets) / (down_std + 1e-10)) * np.sqrt(252) if len(daily_rets) > 1 else 0.0
         running_max  = np.maximum.accumulate(eq_arr)
         drawdowns    = (eq_arr - running_max) / (running_max + 1e-8)

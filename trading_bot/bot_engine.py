@@ -521,13 +521,16 @@ class AutonomousTradingBot:
         ann_return = (1 + total_return) ** (1 / n_years) - 1
 
         vol = float(np.std(returns)) * np.sqrt(252) if len(returns) > 1 else 0.0
-        dn = returns[returns < 0]
-        dn_vol = float(np.std(dn)) * np.sqrt(252) if len(dn) > 0 else 1e-9
 
         rf_d = 0.02 / 252
         excess = returns - rf_d
+        # Downside deviation (por periodo): sqrt(mean(min(r - MAR, 0)^2)) sobre TODOS
+        # los retornos, con MAR = rf diaria. Se anualiza igual que el Sharpe (*sqrt(252))
+        # para que ambos ratios sean comparables.
+        dn_diff = np.minimum(excess, 0.0)
+        dn_dev = float(np.sqrt(np.mean(dn_diff ** 2))) if len(returns) > 1 else 0.0
         sharpe = float(np.mean(excess) / np.std(returns)) * np.sqrt(252) if np.std(returns) > 1e-12 else 0.0
-        sortino = float(np.mean(excess)) * 252 / dn_vol if dn_vol > 1e-12 else 0.0
+        sortino = float(np.mean(excess) / dn_dev) * np.sqrt(252) if dn_dev > 1e-12 else 0.0
 
         dd_arr = np.array(self._drawdown_series(equity))
         max_dd = float(np.min(dd_arr))

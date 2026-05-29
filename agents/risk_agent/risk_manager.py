@@ -242,9 +242,12 @@ class RiskManagerAgent(BaseAgent):
         excess_returns = np.mean(returns) * 252 - risk_free_rate
         sharpe_ratio = excess_returns / volatility if volatility > 0 else 0
         
-        # Sortino Ratio (solo downside deviation)
-        downside_returns = returns[returns < 0]
-        downside_deviation = np.std(downside_returns) * np.sqrt(252) if len(downside_returns) > 0 else 0
+        # Sortino Ratio. Downside deviation = sqrt(mean(min(r - MAR, 0)^2)) sobre TODOS
+        # los retornos, con MAR = rf por periodo (diaria). Anualizada con sqrt(252)
+        # igual que la volatilidad del Sharpe para que ambos ratios sean comparables.
+        mar_daily = risk_free_rate / 252
+        downside_diff = np.minimum(returns - mar_daily, 0.0)
+        downside_deviation = np.sqrt(np.mean(downside_diff ** 2)) * np.sqrt(252)
         sortino_ratio = excess_returns / downside_deviation if downside_deviation > 0 else 0
         
         # Calmar Ratio (retorno / max drawdown)

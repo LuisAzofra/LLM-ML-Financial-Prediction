@@ -294,9 +294,12 @@ class Backtester:
         # Volatilidad anualizada
         volatility = returns_series.std() * np.sqrt(252)
         
-        # Downside volatility (solo retornos negativos)
-        downside_returns = returns_series[returns_series < 0]
-        downside_volatility = downside_returns.std() * np.sqrt(252) if len(downside_returns) > 0 else 0
+        # Downside deviation: sqrt(mean(min(r - MAR, 0)^2)) sobre TODOS los retornos,
+        # con MAR = tasa libre de riesgo por periodo (diaria). Anualizada con sqrt(252)
+        # igual que la volatilidad del Sharpe para que ambos ratios sean comparables.
+        mar_daily = self.risk_free_rate / 252
+        downside_diff = np.minimum(returns_series - mar_daily, 0.0)
+        downside_volatility = np.sqrt(np.mean(downside_diff ** 2)) * np.sqrt(252)
         
         # Upside volatility (solo retornos positivos)
         upside_returns = returns_series[returns_series > 0]
