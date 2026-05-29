@@ -48,12 +48,22 @@ class PatternDetector:
     
     def find_local_extrema(self, prices: np.ndarray, order: int = 5) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Encuentra máximos y mínimos locales
-        
+        Encuentra máximos y mínimos locales.
+
+        AVISO causalidad (anti look-ahead): argrelextrema marca el índice j como
+        extremo solo si es el mayor/menor de la ventana [j-order, j+order], es
+        decir necesita `order` barras POSTERIORES para confirmarlo. Por tanto un
+        extremo en `j` no es conocible hasta `order` barras después. Esto implica
+        un retardo de confirmación: los patrones de las últimas `order` barras del
+        array NO aparecen aún. Para no introducir look-ahead, este detector debe
+        llamarse SIEMPRE con datos disponibles hasta el momento de la decisión
+        (un slice causal); no se debe usar el índice del pivote como si fuera
+        conocible en su propia fecha.
+
         Args:
             prices: Array de precios
             order: Número de puntos a cada lado para considerar un extremo
-        
+
         Returns:
             Tuple de (índices_máximos, índices_mínimos)
         """
