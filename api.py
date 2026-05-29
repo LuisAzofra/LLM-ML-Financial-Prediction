@@ -2131,6 +2131,11 @@ def paper_autonomous_backtest():
     # C3: top-N cross-sectional rotation — solo entrar top-N por momentum z-score
     topn_rotation = bool(body.get('topn_rotation', False))
     topn_value    = int(body.get('topn_value', 5))
+    _mpc_raw = body.get('max_per_class')
+    if _mpc_raw in (None, 0, '0'):
+        max_per_class = None
+    else:
+        max_per_class = int(_mpc_raw)
     # Tier 2.3: bull/bear debate + judge (3× llamadas LLM por decisión).
     # Cache trimestral existente amortiza el coste. Off por default — el
     # gate del harness Tier 1.1 decide su valor neto.
@@ -2250,7 +2255,7 @@ def paper_autonomous_backtest():
         # Tier 5: universo seleccionado por `universe_mode`. Default 'famous'
         # preserva comportamiento histórico. 'broad_random' permite test de
         # sesgo de supervivencia.
-        from data.universe_lists import sample_universe
+        from data.universe_lists import sample_universe, asset_class
         u_sample = sample_universe(
             mode=universe_mode,
             seed=universe_seed,
@@ -2865,8 +2870,8 @@ def paper_autonomous_backtest():
                                 if debug_filter_counts: filter_counts['crash_filter'] += 1
                                 continue
                     # Filtro de régimen SPY (sólo aplica a STOCKS).
-                    is_stock = not sym.endswith('-USD')
-                    if spy_regime and is_stock:
+                    is_equity = asset_class(sym) == 'equity'
+                    if spy_regime and is_equity:
                         market_up = spy_regime.get(ds)
                         if market_up is not None:
                             if direc == 'SHORT' and market_up:
@@ -2912,7 +2917,19 @@ def paper_autonomous_backtest():
                 else:
                     candidates.sort(key=lambda x: x[0], reverse=True)
                     effective_slots = n_slots
-                for ss, sym, bday, direc, llm_dec, _mom60 in candidates[:effective_slots]:
+                class_counts = {}
+                for s in positions:
+                    cl = asset_class(s)
+                    class_counts[cl] = class_counts.get(cl, 0) + 1
+                opened_this_pass = 0
+                ranked = candidates if max_per_class is not None else candidates[:effective_slots]
+                for ss, sym, bday, direc, llm_dec, _mom60 in ranked:
+                    if opened_this_pass >= effective_slots:
+                        break
+                    if max_per_class is not None:
+                        cl = asset_class(sym)
+                        if class_counts.get(cl, 0) >= max_per_class:
+                            continue
                     stop_pct = (cfg.atr_stop_mult * bday['atr']) / max(bday['close'], 1e-8)
                     # ── Tier 3.3: hybrid confidence (ml_weight × ml_conf + (1-w) × llm_conf) ──
                     # Sólo si LLM activo y devolvió confidence_continuous. La
@@ -2992,6 +3009,10 @@ def paper_autonomous_backtest():
                         'regime': ('bull' if (bday.get('sma50', 0) > bday.get('sma200', 0))
                                    else 'bear'),
                     }
+                    opened_this_pass += 1
+                    if max_per_class is not None:
+                        _cl = asset_class(sym)
+                        class_counts[_cl] = class_counts.get(_cl, 0) + 1
 
             # ── 3. Mark-to-market ──────────────────────────────────────────────
             port_val = capital
@@ -3142,6 +3163,8 @@ def paper_autonomous_backtest():
                 'use_llm': use_llm,
                 'llm_provider': llm_provider if use_llm else None,
                 'use_risk_gate': use_risk_gate,
+                'max_concurrent': MAX_CONCURRENT,
+                'max_per_class': max_per_class,
                 'universe': universe_meta,
                 'swing': ({
                     'max_holding_days_swing': max_holding_days_swing,

@@ -80,6 +80,31 @@ def get_sp500_tickers() -> List[str]:
 FAMOUS_STOCKS: List[str] = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN', 'GOOGL']
 FAMOUS_CRYPTO: List[str] = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'BNB-USD']
 
+DIVERSIFIED_STOCKS: List[str] = [
+    'SPY', 'QQQ', 'EFA', 'EEM', 'IWM',
+    'TLT', 'IEF',
+    'GLD', 'SLV',
+    'DBC',
+    'UUP',
+]
+DIVERSIFIED_CRYPTO: List[str] = ['BTC-USD', 'ETH-USD']
+
+_ASSET_CLASS_MAP: dict = {
+    'SPY': 'equity', 'QQQ': 'equity', 'EFA': 'equity', 'EEM': 'equity',
+    'IWM': 'equity',
+    'TLT': 'bond', 'IEF': 'bond',
+    'GLD': 'gold', 'SLV': 'gold',
+    'DBC': 'commodity',
+    'UUP': 'fx',
+}
+
+
+def asset_class(symbol: str) -> str:
+    sym = (symbol or '').strip().upper()
+    if sym.endswith('-USD'):
+        return 'crypto'
+    return _ASSET_CLASS_MAP.get(sym, 'equity')
+
 
 @dataclass
 class UniverseSample:
@@ -105,8 +130,9 @@ def sample_universe(
 
     Args:
         mode: 'famous' (6 tech + 4 cripto, default), 'broad_random' (sample
-            aleatorio del S&P 500 + top cryptos), o 'broad_curated' (lista
-            sectorialmente balanceada — placeholder, ahora delega a famous).
+            aleatorio del S&P 500 + top cryptos), 'diversified' (cesta fija
+            cross-asset), o 'broad_curated' (placeholder, ahora delega a
+            famous).
         seed: semilla para `random.sample`. CRÍTICO: persistirla junto al
             resultado, sin esto el experimento no es reproducible.
         n_stocks: tamaño del muestreo de acciones (sólo aplica a broad_random).
@@ -160,13 +186,22 @@ def sample_universe(
                               n_stocks=len(sampled_stocks),
                               n_crypto=len(sampled_crypto), mode=mode)
 
+    if mode == 'diversified':
+        entries = (
+            [(s, 'stock')  for s in DIVERSIFIED_STOCKS] +
+            [(c, 'crypto') for c in DIVERSIFIED_CRYPTO]
+        )
+        return UniverseSample(entries=entries, seed=seed,
+                              n_stocks=len(DIVERSIFIED_STOCKS),
+                              n_crypto=len(DIVERSIFIED_CRYPTO), mode=mode)
+
     if mode == 'broad_curated':
         # Reservado para futuro: lista sectorialmente balanceada manual.
         # Por ahora delega a famous para no romper integraciones.
         return sample_universe(mode='famous', seed=seed)
 
-    raise ValueError(f"universe_mode desconocido: {mode!r}. "
-                     f"Esperado: 'famous', 'broad_random', 'broad_curated'.")
+    raise ValueError(f"universe_mode desconocido: {mode!r}. Esperado: "
+                     f"'famous', 'broad_random', 'diversified', 'broad_curated'.")
 
 
 if __name__ == '__main__':

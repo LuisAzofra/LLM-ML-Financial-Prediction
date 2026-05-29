@@ -92,6 +92,14 @@ VARIANT_CONFIGS = {
     'aggr_plus': ('AGGR_PLUS_C3',      AGGR_PLUS, '/tmp/perf_grid_aggr_plus_result.json'),
 }
 
+DIVERSIFIED = {**AGGR_PLUS,
+               'universe_mode': 'diversified',
+               'include_etfs': False,
+               'max_per_class': 2}
+
+VARIANT_CONFIGS['diversified'] = ('DIVERSIFIED_XASSET', DIVERSIFIED,
+                                  '/tmp/perf_grid_diversified_result.json')
+
 # Tier 5: variante SWING (mode='swing', holding 1-14d, ATR stop ON, conf
 # floor exit). Hereda AGGR_PLUS (signal_pct=0.70, kelly=0.30, ETFs, topN
 # rotation) y le añade los flags swing.
@@ -152,7 +160,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--variant', choices=list(VARIANT_CONFIGS.keys()), default='med',
                         help='med (default, baseline), aggr (Tier 4.1), aggr_plus (Tier 4.2), '
-                             'swing (Tier 5), swing_broad (Tier 5 + universo broad)')
+                             'swing (Tier 5), swing_broad (Tier 5 + universo broad), '
+                             'diversified (universo cross-asset + cap por clase)')
     parser.add_argument('--include-short', action='store_true',
                         help='Tier 5: añade plazos cortos (1W/2W/1M/2M) a la grid. '
                              'Auto-on para variantes swing*.')
