@@ -27,6 +27,7 @@ import logging
 import math
 import os
 import sqlite3
+import threading
 from typing import Any, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -63,24 +64,32 @@ class TradeJournal:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
+        # Lock que serializa el acceso a la conexión única compartida; api.py es
+        # un servidor Flask multihilo y sqlite3 no permite usar una conexión
+        # desde varios hilos sin esto.
+        self._lock = threading.Lock()
         self.init_db()
 
     def _conn_get(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path, timeout=30.0)
+            # check_same_thread=False: la conexión se comparte entre hilos de
+            # Flask; el acceso queda serializado por self._lock.
+            self._conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
             self._conn.execute('PRAGMA journal_mode=WAL;')
             self._conn.execute('PRAGMA synchronous=NORMAL;')
         return self._conn
 
     def init_db(self) -> None:
-        c = self._conn_get()
-        c.executescript(self.SCHEMA)
-        c.commit()
+        with self._lock:
+            c = self._conn_get()
+            c.executescript(self.SCHEMA)
+            c.commit()
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     # ── Logging ───────────────────────────────────────────────────────────
     def log_trade(
@@ -98,38 +107,41 @@ class TradeJournal:
         """Inserta un trade cerrado. Devuelve id de la fila."""
         vec = [float(x) if x is not None and not (isinstance(x, float) and math.isnan(x)) else 0.0
                for x in features_vec]
-        c = self._conn_get()
-        cur = c.execute(
-            """INSERT INTO trades
-               (symbol, entry_date, exit_date, action, features_json,
-                feature_dim, pnl_pct, hold_days, regime, rationale)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (symbol.upper(), entry_date, exit_date, action.upper(),
-             json.dumps(vec), len(vec), float(pnl_pct), int(hold_days),
-             regime[:64], rationale[:500]),
-        )
-        c.commit()
-        return int(cur.lastrowid)
+        with self._lock:
+            c = self._conn_get()
+            cur = c.execute(
+                """INSERT INTO trades
+                   (symbol, entry_date, exit_date, action, features_json,
+                    feature_dim, pnl_pct, hold_days, regime, rationale)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (symbol.upper(), entry_date, exit_date, action.upper(),
+                 json.dumps(vec), len(vec), float(pnl_pct), int(hold_days),
+                 regime[:64], rationale[:500]),
+            )
+            c.commit()
+            return int(cur.lastrowid)
 
     def count(self, symbol: Optional[str] = None) -> int:
-        c = self._conn_get()
-        if symbol:
-            cur = c.execute('SELECT COUNT(*) FROM trades WHERE symbol = ?', (symbol.upper(),))
-        else:
-            cur = c.execute('SELECT COUNT(*) FROM trades')
-        return int(cur.fetchone()[0])
+        with self._lock:
+            c = self._conn_get()
+            if symbol:
+                cur = c.execute('SELECT COUNT(*) FROM trades WHERE symbol = ?', (symbol.upper(),))
+            else:
+                cur = c.execute('SELECT COUNT(*) FROM trades')
+            return int(cur.fetchone()[0])
 
     def recent_pnl_stats(self, symbol: Optional[str] = None, n: int = 20) -> Dict[str, float]:
         """Stats de los últimos N trades (cerrados): avg_pnl, win_rate, n."""
-        c = self._conn_get()
-        if symbol:
-            cur = c.execute(
-                'SELECT pnl_pct FROM trades WHERE symbol = ? ORDER BY id DESC LIMIT ?',
-                (symbol.upper(), n),
-            )
-        else:
-            cur = c.execute('SELECT pnl_pct FROM trades ORDER BY id DESC LIMIT ?', (n,))
-        rows = [r[0] for r in cur.fetchall()]
+        with self._lock:
+            c = self._conn_get()
+            if symbol:
+                cur = c.execute(
+                    'SELECT pnl_pct FROM trades WHERE symbol = ? ORDER BY id DESC LIMIT ?',
+                    (symbol.upper(), n),
+                )
+            else:
+                cur = c.execute('SELECT pnl_pct FROM trades ORDER BY id DESC LIMIT ?', (n,))
+            rows = [r[0] for r in cur.fetchall()]
         if not rows:
             return {'n': 0, 'avg_pnl': 0.0, 'win_rate': 0.0}
         wins = sum(1 for p in rows if p > 0)
@@ -166,7 +178,6 @@ class TradeJournal:
         """
         if features_vec is None or len(features_vec) == 0:
             return []
-        c = self._conn_get()
         params: List[Any] = []
         where = []
         if symbol:
@@ -179,8 +190,10 @@ class TradeJournal:
         if where:
             sql += ' WHERE ' + ' AND '.join(where)
         sql += ' ORDER BY id DESC LIMIT 500'
-        cur = c.execute(sql, params)
-        rows = cur.fetchall()
+        with self._lock:
+            c = self._conn_get()
+            cur = c.execute(sql, params)
+            rows = cur.fetchall()
         if len(rows) < min_examples:
             return []
 

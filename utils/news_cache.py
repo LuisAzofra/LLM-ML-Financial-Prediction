@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -78,24 +79,32 @@ class NewsCache:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
+        # Lock que serializa el acceso a la conexión única compartida; api.py es
+        # un servidor Flask multihilo y sqlite3 no permite usar una conexión
+        # desde varios hilos sin esto.
+        self._lock = threading.Lock()
         self.init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path, timeout=30.0)
+            # check_same_thread=False: la conexión se comparte entre hilos de
+            # Flask; el acceso queda serializado por self._lock.
+            self._conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
             self._conn.execute('PRAGMA journal_mode=WAL;')
             self._conn.execute('PRAGMA synchronous=NORMAL;')
         return self._conn
 
     def init_db(self) -> None:
-        c = self._get_conn()
-        c.executescript(self.SCHEMA)
-        c.commit()
+        with self._lock:
+            c = self._get_conn()
+            c.executescript(self.SCHEMA)
+            c.commit()
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     @staticmethod
     def _hash(symbol: str, published_at: str, title: str) -> str:
@@ -107,7 +116,6 @@ class NewsCache:
         """Inserta o ignora (por hash) una lista de noticias. Devuelve nº insertadas."""
         if not items:
             return 0
-        c = self._get_conn()
         rows = []
         for d in items:
             ni = NewsItem.from_fetcher_dict(symbol, d)
@@ -119,16 +127,19 @@ class NewsCache:
             ))
         if not rows:
             return 0
-        cur = c.executemany(
-            'INSERT OR IGNORE INTO news VALUES (?, ?, ?, ?, ?, ?, ?)', rows,
-        )
-        c.commit()
-        return cur.rowcount or 0
+        with self._lock:
+            c = self._get_conn()
+            cur = c.executemany(
+                'INSERT OR IGNORE INTO news VALUES (?, ?, ?, ?, ?, ?, ?)', rows,
+            )
+            c.commit()
+            return cur.rowcount or 0
 
     def count_for(self, symbol: str) -> int:
-        c = self._get_conn()
-        cur = c.execute('SELECT COUNT(*) FROM news WHERE symbol = ?', (symbol.upper(),))
-        return int(cur.fetchone()[0])
+        with self._lock:
+            c = self._get_conn()
+            cur = c.execute('SELECT COUNT(*) FROM news WHERE symbol = ?', (symbol.upper(),))
+            return int(cur.fetchone()[0])
 
     def get_news_before(
         self,
@@ -149,21 +160,23 @@ class NewsCache:
             return []
         lower = (anchor - timedelta(days=days_window)).strftime('%Y-%m-%d')
         upper = anchor.strftime('%Y-%m-%d')
-        c = self._get_conn()
-        cur = c.execute(
-            """SELECT symbol, published_at, title, summary, source, link
-               FROM news
-               WHERE symbol = ?
-                 AND substr(published_at, 1, 10) >= ?
-                 AND substr(published_at, 1, 10) <  ?
-               ORDER BY published_at DESC
-               LIMIT ?""",
-            (symbol.upper(), lower, upper, limit),
-        )
+        with self._lock:
+            c = self._get_conn()
+            cur = c.execute(
+                """SELECT symbol, published_at, title, summary, source, link
+                   FROM news
+                   WHERE symbol = ?
+                     AND substr(published_at, 1, 10) >= ?
+                     AND substr(published_at, 1, 10) <  ?
+                   ORDER BY published_at DESC
+                   LIMIT ?""",
+                (symbol.upper(), lower, upper, limit),
+            )
+            rows = cur.fetchall()
         return [
             {'symbol': r[0], 'published_at': r[1], 'title': r[2],
              'summary': r[3] or '', 'source': r[4] or '', 'link': r[5] or ''}
-            for r in cur.fetchall()
+            for r in rows
         ]
 
 
