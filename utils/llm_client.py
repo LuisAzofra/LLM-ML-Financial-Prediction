@@ -115,28 +115,51 @@ class LLMClient:
         Intenta extraer un JSON válido del texto del LLM con hasta max_attempts intentos.
         En el último intento, re-prompta al modelo con instrucciones estrictas.
         """
-        import re
 
         def _try_parse(raw: str) -> Optional[dict]:
-            # Attempt 1: find first {...} block
-            m = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
-            if m:
-                try:
-                    return json.loads(m.group())
-                except Exception:
-                    pass
-            # Attempt 2: strip text before first { and after last }
+            if not raw:
+                return None
+            # (a) intento directo
+            try:
+                obj = json.loads(raw)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+            # (b) primer objeto {...} BALANCEADO por conteo de profundidad de llaves.
+            # Estrategia copiada de agents/debate.py::_safe_parse_json para no
+            # capturar objetos anidados (como hacía el regex \{[^{}]*\}).
             start = raw.find('{')
-            end   = raw.rfind('}')
-            if start != -1 and end != -1 and end > start:
-                try:
-                    return json.loads(raw[start:end + 1])
-                except Exception:
-                    pass
+            while start >= 0:
+                depth = 0
+                for i in range(start, len(raw)):
+                    c = raw[i]
+                    if c == '{':
+                        depth += 1
+                    elif c == '}':
+                        depth -= 1
+                        if depth == 0:
+                            blob = raw[start:i + 1]
+                            try:
+                                obj = json.loads(blob)
+                                if isinstance(obj, dict):
+                                    return obj
+                            except Exception:
+                                pass
+                            break
+                start = raw.find('{', start + 1)
             return None
 
+        def _is_valid(obj) -> bool:
+            # Sólo aceptar dicts que contengan TODAS las required_keys.
+            if not isinstance(obj, dict):
+                return False
+            if required_keys:
+                return all(k in obj for k in required_keys)
+            return True
+
         parsed = _try_parse(text)
-        if parsed:
+        if _is_valid(parsed):
             return parsed
 
         # Final attempt: re-prompt with strict instruction
@@ -150,7 +173,7 @@ class LLMClient:
             retry_result = self._generate_ollama(strict_prompt, system_prompt,
                                                   temperature=0.1, max_tokens=512)
             parsed = _try_parse(retry_result.get('text', ''))
-            if parsed:
+            if _is_valid(parsed):
                 return parsed
 
         return None
@@ -395,16 +418,17 @@ class LLMClient:
             }
 
     def _generate_huggingface(self, prompt: str, system_prompt: Optional[str],
-                              temperature: float, max_tokens: int) -> Dict[str, Any]:
+                              temperature: float, max_tokens: int,
+                              attempt: int = 0) -> Dict[str, Any]:
         """Genera usando Hugging Face Inference API (gratuita)"""
+        max_retries = 3
         url = f"{self.base_url}/{self.model}"
-        
+
         headers = {}
         if self.api_token:
             headers["Authorization"] = f"Bearer {self.api_token}"
-        
+
         # Construir payload según el modelo
-        full_prompt = prompt
         if system_prompt:
             full_prompt = f"<s>[INST] {system_prompt}\n\n{prompt} [/INST]"
         else:
@@ -428,9 +452,19 @@ class LLMClient:
             )
             
             if response.status_code == 429:
+                # Tope de reintentos para evitar recursión infinita si HF mantiene el 429
+                if attempt >= max_retries:
+                    logger.error("❌ Rate limit de HuggingFace persistente tras "
+                                 f"{max_retries} reintentos. Abortando.")
+                    return {
+                        'text': '[ERROR: HuggingFace rate limit (429) persistente]',
+                        'tokens_used': 0,
+                        'error': '429 rate limit'
+                    }
                 logger.warning("⚠️  Rate limit de HuggingFace alcanzado. Esperando...")
                 time.sleep(20)
-                return self._generate_huggingface(prompt, system_prompt, temperature, max_tokens)
+                return self._generate_huggingface(prompt, system_prompt, temperature,
+                                                  max_tokens, attempt=attempt + 1)
             
             response.raise_for_status()
             data = response.json()
@@ -648,7 +682,8 @@ class SimpleLLMClient:
                     'reasoning': 'Análisis VADER (sin LLM)'
                 }
             }
-        except:
+        except Exception as e:
+            logger.error(f"❌ Error en análisis de sentimiento VADER: {e}")
             return {
                 'text': '{"sentiment": "neutral", "score": 0, "confidence": 0}',
                 'parsed': {
