@@ -99,8 +99,6 @@ class AutonomousTradingBot:
       6. Maximo de dias abierto para evitar quedarse atrapado
     """
 
-    # Días mínimos antes de fiarnos del percentil expanding: con pocas muestras
-    # el percentil es inestable, así que en el warmup usamos solo el suelo absoluto.
     SIGNAL_WARMUP = 20
 
     def __init__(self, config: BotConfig = None):
@@ -152,11 +150,7 @@ class AutonomousTradingBot:
         predictions = np.asarray(predictions[:n_test], dtype=float)
         confidences = np.asarray(confidences[:n_test], dtype=float)
 
-        # ── Fuerza de señal ───────────────────────────────────────────────────
-        # Cada elemento depende solo de su propio día → sin look-ahead aquí.
-        # El umbral NO se calcula sobre toda la distribución del test (eso usaría
-        # días futuros y no sería conocible en vivo); se calcula causal dentro del
-        # bucle con ventana expanding (ver SIGNAL_WARMUP más abajo).
+        # ── Fuerza de señal y umbral ──────────────────────────────────────────
         signal_strengths = np.abs(predictions) * confidences
 
         # ── Simulacion de trading ─────────────────────────────────────────────
@@ -178,13 +172,10 @@ class AutonomousTradingBot:
             conf = float(confidences[i])
             ss   = float(signal_strengths[i])
 
-            # ── Umbral causal (expanding-window) ──────────────────────────────
-            # Solo señales pasadas/actuales (hasta i incluido) → sin look-ahead;
-            # en vivo este percentil sí sería conocible cada día.
             if i + 1 >= self.SIGNAL_WARMUP:
                 raw_threshold = np.percentile(signal_strengths[:i + 1], cfg.signal_percentile * 100)
             else:
-                raw_threshold = cfg.min_signal_strength  # warmup: aun no hay distribucion fiable
+                raw_threshold = cfg.min_signal_strength
             threshold = max(raw_threshold, cfg.min_signal_strength)
 
             # ── Comprobar condiciones de cierre ───────────────────────────────
@@ -387,9 +378,6 @@ class AutonomousTradingBot:
         # ── Metricas ──────────────────────────────────────────────────────────
         metrics = self._compute_metrics(equity_curve, all_trades, cfg.initial_capital)
 
-        # Umbral solo para reporting en signal_stats (las decisiones de trading
-        # usan el umbral causal por iteración). Aquí ya conocemos toda la
-        # distribución del test, así que reportamos el percentil sobre ella.
         if len(signal_strengths) > 0:
             final_threshold = max(
                 float(np.percentile(signal_strengths, cfg.signal_percentile * 100)),
@@ -524,9 +512,6 @@ class AutonomousTradingBot:
 
         rf_d = 0.02 / 252
         excess = returns - rf_d
-        # Downside deviation (por periodo): sqrt(mean(min(r - MAR, 0)^2)) sobre TODOS
-        # los retornos, con MAR = rf diaria. Se anualiza igual que el Sharpe (*sqrt(252))
-        # para que ambos ratios sean comparables.
         dn_diff = np.minimum(excess, 0.0)
         dn_dev = float(np.sqrt(np.mean(dn_diff ** 2))) if len(returns) > 1 else 0.0
         sharpe = float(np.mean(excess) / np.std(returns)) * np.sqrt(252) if np.std(returns) > 1e-12 else 0.0

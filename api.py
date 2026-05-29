@@ -66,9 +66,6 @@ else:
 # Flask app
 # ──────────────────────────────────────────────
 app = Flask(__name__, static_folder='frontend', static_url_path='')
-# El frontend lo sirve este mismo Flask (mismo origen), asi que no hace falta
-# CORS abierto. Lo restringimos a localhost para no exponer endpoints que mutan
-# la cartera (paper/execute, paper/reset, ...) a cualquier web.
 CORS(app, origins=[re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")])
 
 TIMEFRAME_MAP = {
@@ -3072,9 +3069,7 @@ def paper_autonomous_backtest():
         eq_arr       = np.array(equity_vals, dtype=float)
         daily_rets   = np.diff(eq_arr) / (eq_arr[:-1] + 1e-8)
         sharpe       = (np.mean(daily_rets) / (np.std(daily_rets) + 1e-10)) * np.sqrt(252) if len(daily_rets) > 1 else 0.0
-        # Sortino: penaliza solo la volatilidad bajista.
-        # Downside deviation = sqrt(mean(min(r - MAR, 0)^2)) sobre TODOS los retornos
-        # con MAR = 0; se anualiza con sqrt(252) igual que el Sharpe -> comparables.
+        # Sortino: penaliza solo la volatilidad bajista
         down_diff    = np.minimum(daily_rets, 0.0)
         down_std     = float(np.sqrt(np.mean(down_diff ** 2))) if len(daily_rets) > 1 else 0.0
         sortino      = (np.mean(daily_rets) / (down_std + 1e-10)) * np.sqrt(252) if len(daily_rets) > 1 else 0.0

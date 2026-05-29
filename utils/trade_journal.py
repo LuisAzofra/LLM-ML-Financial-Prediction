@@ -64,16 +64,11 @@ class TradeJournal:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
-        # Lock que serializa el acceso a la conexión única compartida; api.py es
-        # un servidor Flask multihilo y sqlite3 no permite usar una conexión
-        # desde varios hilos sin esto.
         self._lock = threading.Lock()
         self.init_db()
 
     def _conn_get(self) -> sqlite3.Connection:
         if self._conn is None:
-            # check_same_thread=False: la conexión se comparte entre hilos de
-            # Flask; el acceso queda serializado por self._lock.
             self._conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
             self._conn.execute('PRAGMA journal_mode=WAL;')
             self._conn.execute('PRAGMA synchronous=NORMAL;')

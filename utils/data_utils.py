@@ -184,13 +184,9 @@ class DataProcessor:
         critical_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         df = df.dropna(subset=[col for col in critical_cols if col in df.columns])
         
-        # Rellenar valores nulos en otras columnas numéricas con interpolación.
-        # limit_direction='forward' (no 'both'): rellenar hacia atrás usaría valores
-        # FUTUROS (look-ahead bias) y contaminaría el backtest.
+        # Rellenar valores nulos en otras columnas numéricas con interpolación
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         df[numeric_cols] = df[numeric_cols].interpolate(method='linear', limit_direction='forward')
-        # La interpolación forward no cubre NaN iniciales; se descartan esas filas
-        # en vez de rellenarlas con datos del futuro (backfill).
         df = df.dropna(subset=list(numeric_cols))
 
         final_rows = len(df)
@@ -346,16 +342,9 @@ class DataProcessor:
     def normalize_features(self, df: pd.DataFrame, columns: List[str],
                           method: str = 'minmax', fit_size: int = None) -> pd.DataFrame:
         """
-        Normaliza las características especificadas.
-
-        AVISO leakage: si se normaliza ANTES de partir en train/test, calcular
-        las estadísticas sobre todo el df filtra información del test (look-ahead
-        bias). Pasa fit_size = nº de filas de train para ajustar min/max o
-        mean/std solo con df.iloc[:fit_size] y evitarlo.
+        Normaliza las características especificadas
         """
         df = df.copy()
-        # Solo las primeras fit_size filas (train) definen las estadísticas; si es
-        # None se mantiene el comportamiento original (todo el df) por compatibilidad.
         fit_df = df.iloc[:fit_size] if fit_size is not None else df
 
         for col in columns:

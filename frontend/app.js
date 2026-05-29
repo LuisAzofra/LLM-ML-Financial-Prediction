@@ -1107,7 +1107,6 @@ function buildAnalysisExplanation(data) {
     }
   });
 
-  // Pesos reales del backend (default 75/25); umbrales reales de _compute_hybrid_score.
   const mlW  = Math.round((hybrid.ml_weight  ?? 0.75) * 100);
   const llmW = Math.round((hybrid.llm_weight ?? 0.25) * 100);
   const scoreBound = hybrid.score > 0.4 ? 'above +0.4 → Strong Buy'

@@ -153,7 +153,6 @@ class SentimentAnalystAgent(BaseAgent):
             for i, item in enumerate(news_items[:10])  # Analizar top 10
         ])
         
-        # Casting numérico seguro: el LLM puede devolver strings o tipos raros
         def _to_float(x, default):
             try:
                 return float(x)
@@ -175,8 +174,6 @@ class SentimentAnalystAgent(BaseAgent):
             }
 
             sentiment_str = parsed.get('sentiment', 'neutral').lower()
-            # No fiarse del formato del LLM: castear y acotar a rangos válidos
-            # (un modelo pequeño puede devolver score=5, "0.5" o confidence=1.5)
             score = _to_float(parsed.get('score', sentiment_map.get(sentiment_str, 0)), 0.0)
             score = float(np.clip(score, -1.0, 1.0))
             confidence = _to_float(parsed.get('confidence', 0.5), 0.5)
@@ -272,9 +269,6 @@ class SentimentAnalystAgent(BaseAgent):
             'market': 0.3
         }
         
-        # Acumulamos suma ponderada y el peso de las fuentes realmente presentes.
-        # Normalizar por la suma de pesos usados (no por el total fijo) evita
-        # atenuar el resultado cuando falta alguna fuente (p. ej. solo noticias).
         weighted_score_sum = 0.0
         weighted_confidence_sum = 0.0
         weight_used = 0.0

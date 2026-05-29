@@ -456,10 +456,3 @@ class HybridTradingSystem:
             return hybrid_result
         
         return ml_predictions
-
-    # NOTA: se elimino el metodo backtest() de esta clase. Generaba senales con
-    # np.random.choice (placeholder) y aplicaba retornos de Close[i+1] (look-ahead),
-    # por lo que sus metricas eran ruido y no representaban al sistema. El backtest
-    # canonico, realista (slippage, comisiones, intraday, walk-forward) vive en
-    # `trading_bot/bot_engine.py` (AutonomousTradingBot) y en el endpoint
-    # `/api/paper/autonomous-backtest` de api.py. Usa esos en su lugar.

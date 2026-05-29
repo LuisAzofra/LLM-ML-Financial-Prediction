@@ -99,8 +99,7 @@ class NewsFetcher:
                 logger.warning(f"⚠️  Error fetching {source}: {e}")
                 continue
         
-        # Orden cronológico descendente dejando las noticias sin fecha al final:
-        # con reverse=True la tupla (1, fecha) precede a (0, ''), así las vacías caen al final.
+        # Ordenar por fecha
         all_news.sort(key=self._sort_key, reverse=True)
 
         logger.info(f"✅ Total noticias RSS: {len(all_news)}")
@@ -108,19 +107,10 @@ class NewsFetcher:
     
     @staticmethod
     def _sort_key(item: Dict):
-        """Clave de orden: (hay_fecha, fecha). Con reverse=True las noticias con
-        fecha van primero (más reciente arriba) y las sin fecha quedan al final."""
         published = item.get('published') or ''
         return (1 if published else 0, published)
 
     def _parse_feed(self, url: str, source: str):
-        """
-        Descarga y parsea un feed RSS de forma robusta.
-
-        feedparser.parse(url) no aplica timeout ni lanza ante 404/timeout (deja
-        bozo=True / entries vacío), así que descargamos con la sesión (timeout=10)
-        y comprobamos status y bozo. Devuelve el feed parseado o None si falla.
-        """
         try:
             resp = self.session.get(url, timeout=10)
         except Exception as e:
@@ -134,16 +124,13 @@ class NewsFetcher:
         feed = feedparser.parse(resp.content)
         if feed.bozo:
             logger.warning(f"⚠️  Feed mal formado de {source}: {feed.get('bozo_exception')}")
-            # bozo no siempre implica feed inservible; seguimos si trae entries.
             if not feed.entries:
                 return None
         return feed
 
     def _normalize_rss_entry(self, entry, source: str) -> Dict:
         """Normaliza una entrada RSS al formato estándar"""
-        # Normalizar fecha: si published_parsed existe, anclar en UTC. Si falta o
-        # falla, dejar cadena vacía — NO datetime.now(), que colocaría artificialmente
-        # la noticia al principio del orden cronológico descendente.
+        # Parsear fecha
         published = ''
         try:
             if getattr(entry, 'published_parsed', None):
@@ -312,7 +299,7 @@ class NewsFetcher:
         # Indicadores de sentimiento
         result['sentiment_indicators'] = self.fetch_market_sentiment_indicators()
         
-        # Ordenar y limitar (noticias sin fecha al final, no al principio)
+        # Ordenar y limitar
         result['news'].sort(key=self._sort_key, reverse=True)
         result['news'] = result['news'][:max_items]
         result['total_news'] = len(result['news'])

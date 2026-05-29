@@ -52,13 +52,9 @@ class FinancialDataLoader:
 
             # Use period1/period2 Unix timestamps — this is the ONLY way to guarantee
             # that Yahoo returns data strictly ending at end_date (no leakage for backtesting)
-            # Anclar las fechas en UTC explícito: un datetime naive se interpreta en
-            # hora local al hacer .timestamp(), desplazando el rango según la TZ del host.
             start_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
             end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
             p1 = int(start_dt.timestamp())
-            # period2 es cota superior EXCLUSIVA en la API de Yahoo; sumar 1 día para
-            # incluir la barra de end_date.
             p2 = int((end_dt + timedelta(days=1)).timestamp())
 
             # URL to Yahoo API v8 with explicit date range
@@ -93,9 +89,6 @@ class FinancialDataLoader:
                 logger.warning(f"No se encontraron datos para {symbol} tras reintentos")
                 return pd.DataFrame()
 
-            # Yahoo devuelve {'chart': {'result': None, 'error': {...}}} ante símbolos
-            # inválidos o rangos sin datos; acceder a [0] directamente enmascararía el
-            # fallo con un TypeError/KeyError. Validamos de forma controlada.
             chart = data.get('chart', {})
             api_error = chart.get('error')
             if api_error:
@@ -135,11 +128,7 @@ class FinancialDataLoader:
 
             # Clean up
             df.dropna(subset=['Close'], inplace=True)
-            # Solo ffill: el bfill rellenaría huecos con valores FUTUROS (look-ahead
-            # bias) y contaminaría el backtest. Se elimina deliberadamente.
             df.ffill(inplace=True)
-            # ffill no cubre NaN al inicio de columnas != Close; se descartan esas
-            # filas en vez de rellenarlas con datos del futuro.
             ohlc_cols = [c for c in ['Open', 'High', 'Low', 'Close'] if c in df.columns]
             df.dropna(subset=ohlc_cols, inplace=True)
 
@@ -248,7 +237,6 @@ class CryptoDataLoader:
             end_date: Fecha fin 'YYYY-MM-DD'
             timeframe: Intervalo ('1d', '4h', '1h', etc.)
         """
-        # Sin ccxt no hay exchange: evitar AttributeError al llamar fetch_ohlcv.
         if self.exchange is None:
             logger.warning("ccxt no disponible: download_crypto_data devuelve DataFrame vacío")
             return pd.DataFrame()
@@ -302,7 +290,6 @@ class CryptoDataLoader:
         """
         Obtiene lista de principales criptomonedas por capitalización
         """
-        # Sin ccxt no hay exchange: evitar AttributeError al llamar load_markets.
         if self.exchange is None:
             logger.warning("ccxt no disponible: get_top_cryptos devuelve lista vacía")
             return []

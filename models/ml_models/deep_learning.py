@@ -68,19 +68,14 @@ class LSTMModel:
         # Normalizar
         data = df[feature_cols + [target_col]].values
 
-        # Anti-leakage: el scaler debe ajustarse SOLO con datos de entrenamiento.
-        # Calculamos primero el corte a nivel de filas para que el min/max no
-        # "vea" el bloque de test antes del split temporal.
         split_row = int(len(data) * train_ratio)
 
-        # Guardar parámetros de normalización usando únicamente las filas de train
+        # Guardar parámetros de normalización
         for i, col in enumerate(feature_cols + [target_col]):
             self.scaler_params[col] = {
                 'min': data[:split_row, i].min(),
                 'max': data[:split_row, i].max()
             }
-            # Normalizamos TODO el array con los parámetros de train; epsilon en el
-            # denominador para evitar división por cero en columnas constantes.
             data[:, i] = (data[:, i] - self.scaler_params[col]['min']) / \
                         (self.scaler_params[col]['max'] - self.scaler_params[col]['min'] + 1e-12)
 
@@ -136,8 +131,6 @@ class LSTMModel:
         Desnormaliza las predicciones
         """
         params = self.scaler_params[target_col]
-        # Mismo epsilon que en prepare_data para que la desnormalización sea
-        # exactamente coherente con la normalización (anti-leakage con params de train).
         return pred * (params['max'] - params['min'] + 1e-12) + params['min']
     
     def save_model(self, filepath: str):

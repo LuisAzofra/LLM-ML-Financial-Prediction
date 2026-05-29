@@ -211,15 +211,11 @@ class RiskManagerAgent(BaseAgent):
         mean_ret = np.mean(returns)
         std_ret = np.std(returns)
 
-        # VaR histórico/empírico (diario): pérdida positiva en el percentil de la cola.
-        # No asume normalidad, por lo que es más robusto que el paramétrico.
         q05 = np.percentile(returns, 5)
         q01 = np.percentile(returns, 1)
         var_95 = -q05
         var_99 = -q01
 
-        # CVaR / Expected Shortfall (diario): media de la cola por debajo del percentil,
-        # con el MISMO estimador empírico. Por definición CVaR >= VaR.
         tail_95 = returns[returns <= q05]
         tail_99 = returns[returns <= q01]
         cvar_95 = -tail_95.mean() if tail_95.size > 0 else var_95
@@ -247,9 +243,7 @@ class RiskManagerAgent(BaseAgent):
         excess_returns = np.mean(returns) * 252 - risk_free_rate
         sharpe_ratio = excess_returns / volatility if volatility > 0 else 0
         
-        # Sortino Ratio. Downside deviation = sqrt(mean(min(r - MAR, 0)^2)) sobre TODOS
-        # los retornos, con MAR = rf por periodo (diaria). Anualizada con sqrt(252)
-        # igual que la volatilidad del Sharpe para que ambos ratios sean comparables.
+        # Sortino Ratio (solo downside deviation)
         mar_daily = risk_free_rate / 252
         downside_diff = np.minimum(returns - mar_daily, 0.0)
         downside_deviation = np.sqrt(np.mean(downside_diff ** 2)) * np.sqrt(252)
@@ -314,10 +308,10 @@ class RiskManagerAgent(BaseAgent):
         
         concentration = proposed_value / portfolio_value if portfolio_value > 0 else 0
         
-        # VaR del portfolio (horizonte DIARIO): var_95 es el VaR empírico diario
+        # VaR del portfolio (usando volatilidad predicha)
         portfolio_var = portfolio_value * metrics.var_95
 
-        # VaR con volatilidad GARCH (horizonte DIARIO): vol anualizada -> diaria con /sqrt(252)
+        # VaR con volatilidad GARCH
         portfolio_var_forecast = portfolio_value * metrics.volatility_forecast / np.sqrt(252) * 1.645
         
         return {

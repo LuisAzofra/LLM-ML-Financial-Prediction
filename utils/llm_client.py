@@ -119,16 +119,12 @@ class LLMClient:
         def _try_parse(raw: str) -> Optional[dict]:
             if not raw:
                 return None
-            # (a) intento directo
             try:
                 obj = json.loads(raw)
                 if isinstance(obj, dict):
                     return obj
             except Exception:
                 pass
-            # (b) primer objeto {...} BALANCEADO por conteo de profundidad de llaves.
-            # Estrategia copiada de agents/debate.py::_safe_parse_json para no
-            # capturar objetos anidados (como hacía el regex \{[^{}]*\}).
             start = raw.find('{')
             while start >= 0:
                 depth = 0
@@ -151,7 +147,6 @@ class LLMClient:
             return None
 
         def _is_valid(obj) -> bool:
-            # Sólo aceptar dicts que contengan TODAS las required_keys.
             if not isinstance(obj, dict):
                 return False
             if required_keys:
@@ -452,7 +447,6 @@ class LLMClient:
             )
             
             if response.status_code == 429:
-                # Tope de reintentos para evitar recursión infinita si HF mantiene el 429
                 if attempt >= max_retries:
                     logger.error("❌ Rate limit de HuggingFace persistente tras "
                                  f"{max_retries} reintentos. Abortando.")
