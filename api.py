@@ -2147,6 +2147,8 @@ def paper_autonomous_backtest():
     #   · target_vol        =0.20  (compromise; 0.25 da +5pp pero +5pp drawdown)
     # Para mode='ml' los defaults se mantienen más conservadores.
     is_trend = (mode == 'trend')
+    is_index_trend = (mode == 'index_trend')
+    index_symbol = str(body.get('index_symbol', 'SPY')).upper()
     signal_mode = str(body.get('signal_mode', 'sma')).lower()
     trend_reverse_exit  = bool(body.get('trend_reverse_exit', is_trend))
     disable_atr_stop    = bool(body.get('disable_atr_stop',   is_trend))
@@ -2306,6 +2308,213 @@ def paper_autonomous_backtest():
     )
 
     logger.info(f"=== Autonomous multi-asset backtest [{mode.upper()}]: {start_date}→{end_date} cap=${init_cap:,.0f} ===")
+
+    if is_index_trend:
+        try:
+            loader = FinancialDataLoader()
+            train_start = (start_dt - pd.DateOffset(years=2)).strftime('%Y-%m-%d')
+            dl_end      = (end_dt + pd.DateOffset(days=1)).strftime('%Y-%m-%d')
+            idf = loader.download_data(index_symbol, train_start, dl_end, asset_type='stock')
+            if idf is None or idf.empty or 'Close' not in idf.columns:
+                return jsonify({'status': 'error', 'error': f'No se pudieron cargar datos del índice {index_symbol}'}), 400
+            if hasattr(idf.index, 'tz') and idf.index.tz is not None:
+                idf.index = idf.index.tz_localize(None)
+            idf = idf[idf.index <= end_dt]
+            close_full = idf['Close'].astype(float)
+            sma200_full = close_full.rolling(200, min_periods=100).mean()
+            test_mask = idf.index >= start_dt
+            test_dates  = [str(d.date()) for d in idf.index[test_mask]]
+            test_close  = close_full[test_mask].to_numpy(dtype=float)
+            test_sma200 = sma200_full[test_mask].to_numpy(dtype=float)
+            if len(test_dates) < 5:
+                return jsonify({'status': 'error', 'error': 'Período de test demasiado corto'}), 400
+
+            capital     = init_cap
+            shares      = 0.0
+            in_market   = False
+            entry_price = 0.0
+            entry_date  = None
+            equity_vals = [capital]
+            equity_dts  = [test_dates[0]]
+            all_trades  = []
+
+            for j in range(len(test_dates)):
+                ds  = test_dates[j]
+                px  = test_close[j]
+                sma = test_sma200[j]
+                bullish = (not np.isnan(sma)) and px > sma
+
+                if not in_market and bullish:
+                    entry_adj = px * (1 + cfg.slippage)
+                    pos_val   = capital
+                    shares    = pos_val / entry_adj
+                    capital  -= pos_val + entry_adj * shares * cfg.commission
+                    in_market = True
+                    entry_price = entry_adj
+                    entry_date  = ds
+                elif in_market and (not np.isnan(sma)) and px <= sma:
+                    exit_adj = px * (1 - cfg.slippage)
+                    comm     = exit_adj * shares * cfg.commission
+                    proceeds = exit_adj * shares - comm
+                    cost_basis = entry_price * shares
+                    pnl      = proceeds - cost_basis
+                    capital += proceeds
+                    ret_pct  = float(pnl / (cost_basis + 1e-8) * 100)
+                    hold     = (pd.Timestamp(ds) - pd.Timestamp(entry_date)).days
+                    all_trades.append({
+                        'symbol': index_symbol, 'type': 'LONG', 'action': 'LONG',
+                        'entry_date': entry_date, 'exit_date': ds,
+                        'entry_price': round(entry_price, 4),
+                        'exit_price':  round(float(exit_adj), 4),
+                        'pnl':         round(float(pnl), 2),
+                        'return_pct':  round(ret_pct, 2),
+                        'actual_return_pct': round(ret_pct, 2),
+                        'predicted_return_pct': 0.0,
+                        'exit_reason': 'TREND_REVERSE',
+                        'hold_days':   max(hold, 0),
+                    })
+                    in_market = False
+                    shares = 0.0
+
+                port_val = capital + (shares * px if in_market else 0.0)
+                equity_vals.append(port_val)
+                equity_dts.append(ds)
+
+            if in_market:
+                last_px  = test_close[-1]
+                exit_adj = last_px * (1 - cfg.slippage)
+                comm     = exit_adj * shares * cfg.commission
+                proceeds = exit_adj * shares - comm
+                cost_basis = entry_price * shares
+                pnl      = proceeds - cost_basis
+                capital += proceeds
+                ret_pct  = float(pnl / (cost_basis + 1e-8) * 100)
+                hold     = (pd.Timestamp(test_dates[-1]) - pd.Timestamp(entry_date)).days
+                all_trades.append({
+                    'symbol': index_symbol, 'type': 'LONG', 'action': 'LONG',
+                    'entry_date': entry_date, 'exit_date': test_dates[-1],
+                    'entry_price': round(entry_price, 4),
+                    'exit_price':  round(float(exit_adj), 4),
+                    'pnl':         round(float(pnl), 2),
+                    'return_pct':  round(ret_pct, 2),
+                    'actual_return_pct': round(ret_pct, 2),
+                    'predicted_return_pct': 0.0,
+                    'exit_reason': 'END_OF_TEST',
+                    'hold_days':   max(hold, 0),
+                })
+                in_market = False
+            equity_vals[-1] = capital
+
+            final_val    = float(equity_vals[-1])
+            total_ret    = (final_val - init_cap) / init_cap * 100
+            eq_arr       = np.array(equity_vals, dtype=float)
+            daily_rets   = np.diff(eq_arr) / (eq_arr[:-1] + 1e-8)
+            sharpe       = (np.mean(daily_rets) / (np.std(daily_rets) + 1e-10)) * np.sqrt(252) if len(daily_rets) > 1 else 0.0
+            down_diff    = np.minimum(daily_rets, 0.0)
+            down_std     = float(np.sqrt(np.mean(down_diff ** 2))) if len(daily_rets) > 1 else 0.0
+            sortino      = (np.mean(daily_rets) / (down_std + 1e-10)) * np.sqrt(252) if len(daily_rets) > 1 else 0.0
+            running_max  = np.maximum.accumulate(eq_arr)
+            drawdowns    = (eq_arr - running_max) / (running_max + 1e-8)
+            max_dd       = float(drawdowns.min() * 100)
+            total_ret_dec = (eq_arr[-1] / eq_arr[0]) - 1 if eq_arr[0] > 0 else 0.0
+            n_years       = max(len(daily_rets) / 252, 0.01)
+            ann_ret       = float((1 + total_ret_dec) ** (1 / n_years) - 1)
+            calmar        = ann_ret / max(abs(max_dd / 100), 0.001)
+            winning      = [t for t in all_trades if t['pnl'] > 0]
+            losing       = [t for t in all_trades if t['pnl'] <= 0]
+            win_rate     = len(winning) / len(all_trades) * 100 if all_trades else 0
+            avg_win      = float(np.mean([t['pnl'] for t in winning])) if winning else 0
+            avg_loss     = float(np.mean([t['pnl'] for t in losing]))  if losing  else 0
+            profit_factor = abs(avg_win * len(winning) / (avg_loss * len(losing) + 1e-8)) if losing else float('inf')
+            avg_hold_days = float(np.mean([t['hold_days'] for t in all_trades])) if all_trades else 0.0
+
+            bh_p0  = float(test_close[0])
+            bh_vals = [round(init_cap * float(p) / (bh_p0 + 1e-10), 2) for p in test_close]
+            bh_final_val = float(bh_vals[-1]) if bh_vals else init_cap
+            bh_ret_pct   = (bh_final_val - init_cap) / init_cap * 100
+
+            bench = _benchmark_metrics(loader, test_dates[0], test_dates[-1])
+            spy_ret_b = bench['spy_return_pct']
+            sf_ret_b  = bench['sixtyforty_return_pct']
+            alpha_vs_spy  = round(total_ret - spy_ret_b, 2) if spy_ret_b is not None else None
+            alpha_vs_6040 = round(total_ret - sf_ret_b, 2)  if sf_ret_b  is not None else None
+
+            return jsonify({
+                'status': 'success',
+                'watchlist': [index_symbol],
+                'period': {
+                    'test_start':  test_dates[0],
+                    'test_end':    test_dates[-1],
+                    'n_test_days': len(test_dates),
+                    'n_train_days': 0,
+                    'train_end':   start_date,
+                },
+                'config': {
+                    'initial_capital': init_cap,
+                    'mode': mode,
+                    'index_symbol': index_symbol,
+                    'allow_short': False,
+                    'use_llm': False,
+                },
+                'llm_stats': {'calls': 0, 'cache_hits': 0, 'errors': 0, 'vetoed': 0,
+                              'budget_skipped': 0, 'sent_real_news': 0,
+                              'sent_implied_only': 0, 'avg_latency': 0.0},
+                'risk_gate_stats': {'enabled': False},
+                'filter_counts': None,
+                'performance': {
+                    'initial_capital':    init_cap,
+                    'final_value':        round(final_val, 2),
+                    'final_capital':      round(final_val, 2),
+                    'total_return_pct':   round(total_ret, 2),
+                    'buy_hold_return_pct': round(bh_ret_pct, 2),
+                    'sharpe_ratio':       round(float(sharpe), 3),
+                    'sortino_ratio':      round(float(sortino), 3),
+                    'calmar_ratio':       round(float(calmar), 3),
+                    'max_drawdown_pct':   round(max_dd, 2),
+                    'total_trades':       len(all_trades),
+                    'win_rate_pct':       round(win_rate, 1),
+                    'win_rate':           round(win_rate, 1),
+                    'avg_win':            round(avg_win, 2),
+                    'avg_loss':           round(avg_loss, 2),
+                    'profit_factor':      round(float(profit_factor), 2) if profit_factor != float('inf') else 99.0,
+                    'avg_hold_days':      round(avg_hold_days, 1),
+                    'spy_return_pct':         bench['spy_return_pct'],
+                    'spy_sharpe':             bench['spy_sharpe'],
+                    'spy_maxdd_pct':          bench['spy_maxdd_pct'],
+                    'sixtyforty_return_pct':  bench['sixtyforty_return_pct'],
+                    'sixtyforty_sharpe':      bench['sixtyforty_sharpe'],
+                    'sixtyforty_maxdd_pct':   bench['sixtyforty_maxdd_pct'],
+                    'alpha_vs_spy_pct':       alpha_vs_spy,
+                    'alpha_vs_6040_pct':      alpha_vs_6040,
+                },
+                'equity_curve': {
+                    'dates':           equity_dts,
+                    'values':          [round(v, 2) for v in equity_vals],
+                    'portfolio_value': [round(v, 2) for v in equity_vals],
+                    'buy_hold_value':  bh_vals,
+                },
+                'trades': all_trades[-100:],
+                'per_asset': [{
+                    'symbol':   index_symbol,
+                    'trades':   len(all_trades),
+                    'pnl':      round(sum(t['pnl'] for t in all_trades), 2),
+                    'win_rate': round(win_rate, 1),
+                }] if all_trades else [],
+                'active_timeline': [],
+                'signal_stats': {
+                    'total_signals':    len(test_dates),
+                    'filtered_signals': len(all_trades),
+                    'threshold':        0.0,
+                    'max_signal':       0.0,
+                    'filter_percentile': 0.0,
+                },
+                'leakage_proof': True,
+            })
+        except ValueError as ve:
+            return jsonify({'status': 'error', 'error': str(ve)}), 400
+        except Exception as e:
+            logger.error(f"Index-trend backtest error: {traceback.format_exc()}")
+            return jsonify({'status': 'error', 'error': str(e)}), 500
 
     try:
         # Tier 4.2 C1: opcional añadir ETFs sectoriales/factor para diversificar

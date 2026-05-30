@@ -165,6 +165,10 @@ VARIANT_CONFIGS['swing']       = ('SWING_DYNAMIC',  SWING_BASE,
 VARIANT_CONFIGS['swing_broad'] = ('SWING_BROAD_42', SWING_BROAD_42,
                                   '/tmp/perf_grid_swing_broad_result.json')
 
+INDEX_TREND = {'mode': 'index_trend', 'initial_capital': 100_000, 'use_llm': False}
+VARIANT_CONFIGS['index_trend'] = ('INDEX_TREND', INDEX_TREND,
+                                  '/tmp/perf_grid_index_trend_result.json')
+
 
 def call(start_date: str, end_date: str, body_base: dict) -> dict:
     body = {**body_base, 'start_date': start_date, 'end_date': end_date}
