@@ -1619,3 +1619,59 @@ PORT=5057 TFG_DISABLE_TF=1 TFG_LIGHTWEIGHT=1 .venv/bin/python -u api.py &
 ```
 
 ---
+
+## Tier 8.2 — Anti-whipsaw sobre Faber-QQQ: rebalanceo mensual (S3), banda (S2), voto multi-lookback (S4)
+
+**Estado: RECHAZADOS ✗ como mejora de retorno** (mensual = mejor filtro de caídas en bears, pero retrasa en bulls; el lockbox 2024-25 es bull puro y los penaliza). **Hallazgo colateral positivo: Faber-QQQ+parking bate al 60/40 y empata al SPY OOS.**
+
+Todas las variantes apilan sobre el parking (S1, aceptado) y se comparan, pareadas, contra `faber_qqq_park` (parking + diario). Todas default-off; baseline 2019 reproducido EXACTO; test de causalidad sigue verde tras el refactor de la señal.
+
+- **S3 rebalanceo mensual** (`rebalance_frequency=monthly`, decide solo en fin de mes; Faber canónico). **S2 banda de histéresis** (`band=0.01`: entra a `sma·(1+b)`, sale a `sma·(1−b)`). **S4 voto multi-lookback** (`index_signal=vote`: mantiene si la mayoría de {SMA100,150,200,250} dicen "encima"; long/flot sin TP/SL → distinto del TSMOM rechazado del Tier 7).
+
+**DEV 2014-2023 (pareado vs park, n=30/horizonte):** las CIs de Δret cruzan 0 en casi todos los plazos (ninguna mejora robusta en MEDIA). El desglose por **régimen** es lo informativo:
+
+| variante | ventanas QQQ-baja (n=32) ΔRet vs park | ventanas QQQ-alza (n=148) |
+|----------|--------------------------------------:|--------------------------:|
+| mensual | **+3.26pp** (mediana +1.44) | −1.03pp |
+| banda | +2.37pp | +0.14pp |
+| voto | −0.31pp | +0.44pp |
+
+En ventanas con QQQ a la baja, el **mensual** pierde solo **−1.16%** frente al **−6.13%** de QQQ y **bate a QQQ el 81%** de las veces (vs 34% del Faber diario, que se desangra en whipsaw). Es decir: el mensual es un filtro de caídas mucho mejor, a costa de ~1pp de retraso en los bull.
+
+**LOCKBOX 2024-2025 (bull puro, pareado vs park):** sin bears que premien la protección, las variantes solo muestran el coste del retraso:
+
+| variante | Δret vs park 6M | 1Y | 2Y |
+|----------|----------------:|---:|---:|
+| mensual | −2.84 [−3.96,−1.58] | −6.00 [−7.38,−4.56] | **−12.84 [−15.27,−10.73]** |
+| banda | −1.40 [−1.95,−0.84] | −2.95 [−3.45,−2.44] | −4.45 [−4.52,−4.37] |
+| voto | 0.00 | 0.00 | 0.00 (≡ park: QQQ sobre todas las medias todo el año) |
+
+Todas con IC95% negativo (mensual/banda) o nulo (voto) → **ninguna mejora el retorno OOS; RECHAZADAS.**
+
+**Hallazgo colateral (lo que SÍ bate a un benchmark OOS) — `faber_qqq_park` absoluto en lockbox:**
+
+| Plazo | ret | DD | alpha vs 60/40 | bate 60/40 | alpha vs SPY | bate SPY |
+|-------|----:|---:|---------------:|-----------:|-------------:|---------:|
+| 6M | +6.04% | −8.6% | +2.35 | 73% | −0.47 | 33% |
+| 1Y | +15.88% | −10.7% | +7.99 | 93% | +0.61 | 60% |
+| 2Y | +38.82% | −13.6% | +19.34 | **100%** | +0.78 | 60% |
+
+**Faber-QQQ+parking bate al 60/40 de forma robusta OOS (73-100% de las ventanas) y empata/supera ligeramente al SPY con menos drawdown.** Es uno de los objetivos del proyecto (batir al benchmark 60/40). Matiz honesto: frente al 60/40 esto es sobre todo **beta de crecimiento + filtro de caídas**, no alpha; y sigue **sin batir a su propio subyacente QQQ** en un bull.
+
+### Lecciones / decisión
+
+- Reducir whipsaw (mensual/banda/voto) NO es gratis: es un trade-off bear↔bull. En datos dominados por mercados alcistas (y en el lockbox 2024-25, bull puro) cuesta más upside del que ahorra. El mensual es un **mejor filtro de caídas** (bate a QQQ el 81% en bajadas) y queda disponible como palanca de **gestión de riesgo**, pero no como mejora de retorno → no pasa el gate.
+- **Insight estructural (para la memoria):** una estrategia *long/flat* sobre un único índice no puede batir a comprar-y-mantener ese índice en un bull sostenido; su valor es esquivar drawdown en los bear. El lockbox 2024-25, al no tener bear real, no puede validar esa ventaja (y de hecho penaliza el timing). Honesto y coherente con el Tier 7.
+- Veredicto del ciclo estructural: **solo S1 (parking) se acepta.** S2/S3/S4 rechazadas como mejora de retorno. La mejor config honesta pasa a ser **Faber-QQQ + parking**.
+
+### Comandos reproducibles
+
+```
+.venv/bin/python -u tools/run_random_grid.py --variant faber_qqq_monthly --universe dev
+.venv/bin/python -u tools/run_random_grid.py --variant faber_qqq_band    --universe dev
+.venv/bin/python -u tools/run_random_grid.py --variant faber_qqq_vote    --universe dev
+.venv/bin/python -u tools/run_random_grid.py --variant faber_qqq_honest  --universe dev
+# (repetir con --universe lockbox para la validación OOS)
+```
+
+---

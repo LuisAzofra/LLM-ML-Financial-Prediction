@@ -2367,6 +2367,41 @@ def paper_autonomous_backtest():
                     logger.warning(f"Parking rf (^IRX) omitido: {rf_err}")
                     daily_rf = np.zeros(len(test_dates), dtype=float)
 
+            band = body.get('band', None)
+            entry_band = float(body.get('entry_band', band if band is not None else 0.0))
+            exit_band = float(body.get('exit_band', band if band is not None else 0.0))
+
+            rebalance_frequency = str(body.get('rebalance_frequency', 'daily')).lower()
+            test_dt_index = pd.DatetimeIndex(pd.to_datetime(test_dates))
+            is_rebal = np.ones(len(test_dates), dtype=bool)
+            if rebalance_frequency in ('weekly', 'monthly'):
+                if rebalance_frequency == 'monthly':
+                    rebal_keys = [(d.year, d.month) for d in test_dt_index]
+                else:
+                    iso = test_dt_index.isocalendar()
+                    rebal_keys = [(int(y), int(w)) for y, w in zip(iso.year, iso.week)]
+                n_keys = len(rebal_keys)
+                is_rebal = np.array([
+                    (k == n_keys - 1) or (rebal_keys[k] != rebal_keys[k + 1])
+                    for k in range(n_keys)
+                ], dtype=bool)
+
+            index_signal = str(body.get('index_signal', 'sma')).lower()
+            vote_lookbacks = list(body.get('vote_lookbacks', [100, 150, 200, 250]))
+            vt = body.get('vote_threshold', None)
+            vote_basis = str(body.get('vote_basis', 'sma')).lower()
+            vote_arrays = []
+            vote_threshold = 0
+            if index_signal == 'vote':
+                for k in vote_lookbacks:
+                    k = int(k)
+                    if vote_basis == 'momentum':
+                        series = close_full / close_full.shift(k) - 1.0
+                    else:
+                        series = close_full.rolling(k, min_periods=k // 2).mean()
+                    vote_arrays.append(series.to_numpy(dtype=float)[test_mask])
+                vote_threshold = int(vt) if vt is not None else int(np.ceil(len(vote_lookbacks) / 2))
+
             capital     = init_cap
             shares      = 0.0
             in_market   = False
@@ -2387,39 +2422,56 @@ def paper_autonomous_backtest():
                     capital += interest
                     parking_interest += interest
                     parking_days += 1
-                bullish = (not np.isnan(sma)) and px > sma
+                if index_signal == 'vote':
+                    votes = 0
+                    any_valid = False
+                    for arr in vote_arrays:
+                        v = arr[j]
+                        if not np.isnan(v):
+                            any_valid = True
+                            if vote_basis == 'momentum':
+                                if v > 0:
+                                    votes += 1
+                            elif px > v:
+                                votes += 1
+                    sig_bull = any_valid and votes >= vote_threshold
+                    sig_exit = any_valid and votes < vote_threshold
+                else:
+                    sig_bull = (not np.isnan(sma)) and px > sma * (1 + entry_band)
+                    sig_exit = (not np.isnan(sma)) and px <= sma * (1 - exit_band)
 
-                if not in_market and bullish:
-                    entry_adj = px * (1 + cfg.slippage)
-                    pos_val   = capital
-                    shares    = pos_val / entry_adj
-                    capital  -= pos_val + entry_adj * shares * cfg.commission
-                    in_market = True
-                    entry_price = entry_adj
-                    entry_date  = ds
-                elif in_market and (not np.isnan(sma)) and px <= sma:
-                    exit_adj = px * (1 - cfg.slippage)
-                    comm     = exit_adj * shares * cfg.commission
-                    proceeds = exit_adj * shares - comm
-                    cost_basis = entry_price * shares
-                    pnl      = proceeds - cost_basis
-                    capital += proceeds
-                    ret_pct  = float(pnl / (cost_basis + 1e-8) * 100)
-                    hold     = (pd.Timestamp(ds) - pd.Timestamp(entry_date)).days
-                    all_trades.append({
-                        'symbol': index_symbol, 'type': 'LONG', 'action': 'LONG',
-                        'entry_date': entry_date, 'exit_date': ds,
-                        'entry_price': round(entry_price, 4),
-                        'exit_price':  round(float(exit_adj), 4),
-                        'pnl':         round(float(pnl), 2),
-                        'return_pct':  round(ret_pct, 2),
-                        'actual_return_pct': round(ret_pct, 2),
-                        'predicted_return_pct': 0.0,
-                        'exit_reason': 'TREND_REVERSE',
-                        'hold_days':   max(hold, 0),
-                    })
-                    in_market = False
-                    shares = 0.0
+                if is_rebal[j]:
+                    if not in_market and sig_bull:
+                        entry_adj = px * (1 + cfg.slippage)
+                        pos_val   = capital
+                        shares    = pos_val / entry_adj
+                        capital  -= pos_val + entry_adj * shares * cfg.commission
+                        in_market = True
+                        entry_price = entry_adj
+                        entry_date  = ds
+                    elif in_market and sig_exit:
+                        exit_adj = px * (1 - cfg.slippage)
+                        comm     = exit_adj * shares * cfg.commission
+                        proceeds = exit_adj * shares - comm
+                        cost_basis = entry_price * shares
+                        pnl      = proceeds - cost_basis
+                        capital += proceeds
+                        ret_pct  = float(pnl / (cost_basis + 1e-8) * 100)
+                        hold     = (pd.Timestamp(ds) - pd.Timestamp(entry_date)).days
+                        all_trades.append({
+                            'symbol': index_symbol, 'type': 'LONG', 'action': 'LONG',
+                            'entry_date': entry_date, 'exit_date': ds,
+                            'entry_price': round(entry_price, 4),
+                            'exit_price':  round(float(exit_adj), 4),
+                            'pnl':         round(float(pnl), 2),
+                            'return_pct':  round(ret_pct, 2),
+                            'actual_return_pct': round(ret_pct, 2),
+                            'predicted_return_pct': 0.0,
+                            'exit_reason': 'TREND_REVERSE',
+                            'hold_days':   max(hold, 0),
+                        })
+                        in_market = False
+                        shares = 0.0
 
                 port_val = capital + (shares * px if in_market else 0.0)
                 equity_vals.append(port_val)

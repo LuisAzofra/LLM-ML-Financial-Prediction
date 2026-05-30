@@ -190,6 +190,22 @@ FABER_QQQ_PARK = {**FABER_QQQ, 'parking_mode': 'rate'}
 VARIANT_CONFIGS['faber_qqq_park'] = ('FABER_QQQ_PARK', FABER_QQQ_PARK,
                                      '/tmp/perf_grid_faber_qqq_park_result.json')
 
+FABER_QQQ_MONTHLY = {**FABER_QQQ, 'parking_mode': 'rate', 'rebalance_frequency': 'monthly'}
+VARIANT_CONFIGS['faber_qqq_monthly'] = ('FABER_QQQ_MONTHLY', FABER_QQQ_MONTHLY,
+                                        '/tmp/perf_grid_faber_qqq_monthly_result.json')
+
+FABER_QQQ_BAND = {**FABER_QQQ, 'parking_mode': 'rate', 'band': 0.01}
+VARIANT_CONFIGS['faber_qqq_band'] = ('FABER_QQQ_BAND', FABER_QQQ_BAND,
+                                     '/tmp/perf_grid_faber_qqq_band_result.json')
+
+FABER_QQQ_VOTE = {**FABER_QQQ, 'parking_mode': 'rate', 'index_signal': 'vote'}
+VARIANT_CONFIGS['faber_qqq_vote'] = ('FABER_QQQ_VOTE', FABER_QQQ_VOTE,
+                                     '/tmp/perf_grid_faber_qqq_vote_result.json')
+
+FABER_QQQ_HONEST = {**FABER_QQQ, 'parking_mode': 'rate', 'rebalance_frequency': 'monthly', 'band': 0.01}
+VARIANT_CONFIGS['faber_qqq_honest'] = ('FABER_QQQ_HONEST', FABER_QQQ_HONEST,
+                                       '/tmp/perf_grid_faber_qqq_honest_result.json')
+
 
 def call(start_date: str, end_date: str, body_base: dict) -> dict:
     body = {**body_base, 'start_date': start_date, 'end_date': end_date}
