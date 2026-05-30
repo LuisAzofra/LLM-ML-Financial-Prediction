@@ -60,6 +60,17 @@ START_DATES = [
     '2023-01-03',  # recovery temprana
 ]
 
+LOCKBOX_START_DATES = [
+    '2024-01-02',
+    '2024-04-01',
+    '2024-07-01',
+    '2024-10-01',
+    '2025-01-02',
+    '2025-04-01',
+    '2025-07-01',
+    '2025-10-01',
+]
+
 # Configuración base — variante MED por consistencia con Tiers anteriores
 MED_BASE = {
     'mode': 'trend',
@@ -130,6 +141,9 @@ VARIANT_CONFIGS['ride504'] = ('RIDE_504', RIDE_504, '/tmp/perf_grid_ride504_resu
 
 RIDE_NOCAP = {**AGGR_PLUS, 'max_holding_days': 99999}
 VARIANT_CONFIGS['ride_nocap'] = ('RIDE_NOCAP', RIDE_NOCAP, '/tmp/perf_grid_ride_nocap_result.json')
+
+AGGR_MAX = {**AGGR_PLUS, 'max_position_pct': 0.40, 'topn_value': 3, 'max_concurrent': 3}
+VARIANT_CONFIGS['aggr_max'] = ('AGGR_MAX', AGGR_MAX, '/tmp/perf_grid_aggr_max_result.json')
 
 # Tier 5: variante SWING (mode='swing', holding 1-14d, ATR stop ON, conf
 # floor exit). Hereda AGGR_PLUS (signal_pct=0.70, kelly=0.30, ETFs, topN
@@ -202,8 +216,16 @@ def main():
     parser.add_argument('--include-short', action='store_true',
                         help='Tier 5: añade plazos cortos (1W/2W/1M/2M) a la grid. '
                              'Auto-on para variantes swing*.')
+    parser.add_argument('--lockbox', action='store_true',
+                        help='Sustituye las START_DATES por fechas 2024-2025 '
+                             '(out-of-sample) y añade sufijo _lockbox al out_path.')
     args = parser.parse_args()
     variant_label, body_base, out_path = VARIANT_CONFIGS[args.variant]
+
+    start_dates = LOCKBOX_START_DATES if args.lockbox else START_DATES
+    if args.lockbox:
+        root, ext = os.path.splitext(out_path)
+        out_path = f"{root}_lockbox{ext}"
 
     # Tier 5: swing y swing_broad usan automáticamente plazos cortos. Cualquier
     # variante puede pedirlos con --include-short.
@@ -214,13 +236,13 @@ def main():
     runs = []
     skipped = []
 
-    print(f"Grid: {len(START_DATES)} fechas × {len(horizons_eff)} plazos = "
-          f"{len(START_DATES)*len(horizons_eff)} backtests "
+    print(f"Grid: {len(start_dates)} fechas × {len(horizons_eff)} plazos = "
+          f"{len(start_dates)*len(horizons_eff)} backtests "
           f"({'incl. cortos' if use_short else 'plazos largos'})")
     print(f"Variante: {variant_label}  config={body_base}")
     print()
 
-    for sd in START_DATES:
+    for sd in start_dates:
         sd_dt = datetime.strptime(sd, '%Y-%m-%d').date()
         for h_label, h_days in horizons_eff:
             end_dt = sd_dt + timedelta(days=h_days)
@@ -292,7 +314,7 @@ def main():
         'generated_at': datetime.now().isoformat(timespec='seconds'),
         'variant': variant_label,
         'horizons': [(l, d) for l, d in horizons_eff],
-        'start_dates': START_DATES,
+        'start_dates': start_dates,
         'config': body_base,
         'runs': runs,
         'skipped': skipped,

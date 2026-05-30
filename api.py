@@ -2230,6 +2230,7 @@ def paper_autonomous_backtest():
     max_holding_days_swing = int(body.get('max_holding_days_swing', 14))
     min_holding_days_swing = int(body.get('min_holding_days_swing', 1))
     conf_floor             = float(body.get('conf_floor',          0.50))
+    max_position_pct       = float(body.get('max_position_pct',    0.18))
 
     # ── Risk gate determinístico (Tier 1.3) ────────────────────────────────
     # Vol-target portfolio + daily-loss limit + kill-switch DD + caps por
@@ -2291,7 +2292,7 @@ def paper_autonomous_backtest():
                         else (float(regime_adx_min_override) if regime_adx_min_override is not None
                               else 22.0)),
         atr_stop_mult=2.0,
-        max_position_pct=0.18,
+        max_position_pct=max_position_pct,
         target_vol=float(target_vol_override) if target_vol_override is not None else 0.15,
         min_signal_strength=0.012,
         # Tier 5: en mode='swing' el cap es `max_holding_days_swing` (default 14)
