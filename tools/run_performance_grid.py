@@ -122,6 +122,15 @@ DIV_FULL = {**DIVERSIFIED,
 VARIANT_CONFIGS['div_full'] = ('DIV_FULL', DIV_FULL,
                                '/tmp/perf_grid_div_full_result.json')
 
+RIDE_252 = {**AGGR_PLUS, 'max_holding_days': 252}
+VARIANT_CONFIGS['ride252'] = ('RIDE_252', RIDE_252, '/tmp/perf_grid_ride252_result.json')
+
+RIDE_504 = {**AGGR_PLUS, 'max_holding_days': 504}
+VARIANT_CONFIGS['ride504'] = ('RIDE_504', RIDE_504, '/tmp/perf_grid_ride504_result.json')
+
+RIDE_NOCAP = {**AGGR_PLUS, 'max_holding_days': 99999}
+VARIANT_CONFIGS['ride_nocap'] = ('RIDE_NOCAP', RIDE_NOCAP, '/tmp/perf_grid_ride_nocap_result.json')
+
 # Tier 5: variante SWING (mode='swing', holding 1-14d, ATR stop ON, conf
 # floor exit). Hereda AGGR_PLUS (signal_pct=0.70, kelly=0.30, ETFs, topN
 # rotation) y le añade los flags swing.
@@ -170,6 +179,12 @@ def call(start_date: str, end_date: str, body_base: dict) -> dict:
         'profit_factor': p.get('profit_factor', 0.0),
         'win_rate_pct':  p.get('win_rate_pct', 0.0),
         'total_trades':  p.get('total_trades', 0),
+        'spy_return_pct':         p.get('spy_return_pct', None),
+        'spy_sharpe':             p.get('spy_sharpe', None),
+        'spy_maxdd_pct':          p.get('spy_maxdd_pct', None),
+        'sixtyforty_return_pct':  p.get('sixtyforty_return_pct', None),
+        'alpha_vs_spy_pct':       p.get('alpha_vs_spy_pct', None),
+        'alpha_vs_6040_pct':      p.get('alpha_vs_6040_pct', None),
         'elapsed':       elapsed,
     }
 

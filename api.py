@@ -2050,6 +2050,62 @@ def _generate_bot_predictions_by_date(
     }
 
 
+def _series_metrics(daily_rets: np.ndarray) -> tuple:
+    if daily_rets is None or len(daily_rets) < 2:
+        return 0.0, 0.0
+    sharpe = float((np.mean(daily_rets) / (np.std(daily_rets) + 1e-10)) * np.sqrt(252))
+    eq = np.cumprod(1.0 + daily_rets)
+    running_max = np.maximum.accumulate(eq)
+    drawdowns = (eq - running_max) / (running_max + 1e-8)
+    maxdd = float(drawdowns.min() * 100)
+    return sharpe, maxdd
+
+
+def _benchmark_metrics(loader, start_date: str, end_date: str) -> dict:
+    out = {
+        'spy_return_pct': None, 'spy_sharpe': None, 'spy_maxdd_pct': None,
+        'sixtyforty_return_pct': None, 'sixtyforty_sharpe': None, 'sixtyforty_maxdd_pct': None,
+    }
+
+    def _close_series(symbol: str):
+        df = loader.download_data(symbol, start_date, end_date, asset_type='stock')
+        if df is None or df.empty or 'Close' not in df.columns or len(df) < 2:
+            return None
+        if hasattr(df.index, 'tz') and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        close = df['Close'].astype(float)
+        return close[close > 0]
+
+    try:
+        spy = _close_series('SPY')
+        if spy is not None and len(spy) >= 2:
+            spy_rets = spy.pct_change().dropna().to_numpy()
+            out['spy_return_pct'] = round(float(spy.iloc[-1] / spy.iloc[0] - 1.0) * 100, 2)
+            spy_sh, spy_dd = _series_metrics(spy_rets)
+            out['spy_sharpe'] = round(spy_sh, 3)
+            out['spy_maxdd_pct'] = round(spy_dd, 2)
+    except Exception as spy_err:
+        logger.warning(f"SPY benchmark omitido: {spy_err}")
+
+    try:
+        spy = _close_series('SPY')
+        tlt = _close_series('TLT')
+        if spy is not None and tlt is not None:
+            spy_ret = spy.pct_change()
+            tlt_ret = tlt.pct_change()
+            combo = pd.concat([spy_ret, tlt_ret], axis=1, join='inner').dropna()
+            if len(combo) >= 2:
+                port_rets = (0.6 * combo.iloc[:, 0] + 0.4 * combo.iloc[:, 1]).to_numpy()
+                out['sixtyforty_return_pct'] = round(float(np.prod(1.0 + port_rets) - 1.0) * 100, 2)
+                sf_sh, sf_dd = _series_metrics(port_rets)
+                out['sixtyforty_sharpe'] = round(sf_sh, 3)
+                out['sixtyforty_maxdd_pct'] = round(sf_dd, 2)
+    except Exception as sf_err:
+        logger.warning(f"60/40 benchmark omitido: {sf_err}")
+
+    return out
+
+
 @app.route('/api/paper/autonomous-backtest', methods=['POST'])
 def paper_autonomous_backtest():
     """
@@ -3198,6 +3254,13 @@ def paper_autonomous_backtest():
         bh_final_val   = float(bh_vals[-1]) if bh_vals else init_cap
         bh_ret_pct     = (bh_final_val - init_cap) / init_cap * 100
 
+        # Benchmarks realistas sobre el periodo real del test (SPY y 60/40 SPY+TLT).
+        bench = _benchmark_metrics(loader, all_dates[0], all_dates[-1])
+        spy_ret_b = bench['spy_return_pct']
+        sf_ret_b  = bench['sixtyforty_return_pct']
+        alpha_vs_spy  = round(total_ret - spy_ret_b, 2) if spy_ret_b is not None else None
+        alpha_vs_6040 = round(total_ret - sf_ret_b, 2)  if sf_ret_b  is not None else None
+
         return jsonify({
             'status': 'success',
             'watchlist': trained_ok,
@@ -3263,6 +3326,14 @@ def paper_autonomous_backtest():
                 'avg_loss':           round(avg_loss, 2),
                 'profit_factor':      round(float(profit_factor), 2) if profit_factor != float('inf') else 99.0,
                 'avg_hold_days':      round(avg_hold_days, 1),
+                'spy_return_pct':         bench['spy_return_pct'],
+                'spy_sharpe':             bench['spy_sharpe'],
+                'spy_maxdd_pct':          bench['spy_maxdd_pct'],
+                'sixtyforty_return_pct':  bench['sixtyforty_return_pct'],
+                'sixtyforty_sharpe':      bench['sixtyforty_sharpe'],
+                'sixtyforty_maxdd_pct':   bench['sixtyforty_maxdd_pct'],
+                'alpha_vs_spy_pct':       alpha_vs_spy,
+                'alpha_vs_6040_pct':      alpha_vs_6040,
             },
             'equity_curve': {
                 'dates':           equity_dts,
