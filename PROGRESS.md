@@ -1478,3 +1478,83 @@ TimesFM 2.0 500M es decoder transformer entrenado en 100B+ time points (electric
 **NO instalar `timesfm` package** (PyPI versión 1.0.0 + 1.3.0 todas tienen incompatibilidades con Python 3.13 del proyecto y dependencias JAX rotas). Usar el integrado nativo en `transformers ≥ 4.45`: `from transformers import TimesFmModelForPrediction`. El input al `forward` debe ser una **lista de tensores 1D** (no batched 2D); pasar `[torch.from_numpy(x).float()]` para 1 serie o `[t1, t2, ...]` para batch.
 
 ---
+
+## Tier 7 — Auditoría de código, corrección de sesgos y validación out-of-sample (lockbox)
+
+**Contexto:** revisión completa del código (limpieza + correctness) y búsqueda honesta de mejoras de rentabilidad, cerrada con una validación en datos NUNCA vistos. Ramas: `code-review-fixes` (correctness) y `strategy-improvements` (experimentos de estrategia, partiendo de la anterior).
+
+### Fase 0 — Correcciones de correctness (rama code-review-fixes)
+
+Bugs que inflaban artificialmente los resultados, corregidos ANTES de medir nada:
+
+- **Data leakage en escalado**: el scaler se ajustaba sobre train+test antes del split → ahora solo con train (+ embargo de 20 filas en el target de volatilidad). [deep_learning.py, traditional_ml.py]
+- **Look-ahead en ingesta**: eliminado `bfill` (rellenaba con precios futuros) e interpolación bidireccional → relleno solo hacia delante. [data_loader.py, data_utils.py]
+- **Umbral de señal no causal**: el percentil se calculaba sobre toda la distribución del test → ventana expanding causal. [bot_engine.py]
+- **Curva de equity con calendario mixto (acciones+cripto)**: las posiciones desaparecían del valor de cartera en los días sin barra (findes de cripto vs acciones), generando saltos fantasma de ±50%. Forward-fill del último cierre. **Vol diaria de la curva: ~25% → ~1.7%.** [api.py] — era el que MÁS inflaba Sharpe/Sortino/maxDD.
+- Otros: **Sortino** (downside deviation estándar), **VaR/CVaR** (estimador empírico, CVaR≥VaR), **backtest con `np.random.choice` eliminado** (HybridTradingSystem), parseo JSON del LLM robusto, sentiment (clip/normalización por fuentes presentes), SQLite thread-safe, CORS restringido, robustez de ingesta (validación Yahoo, period2/UTC, RSS con timeout).
+
+### Fase 1 — Baseline honesto (con la curva ya corregida)
+
+`aggr_plus` (trend multi-activo, dev 2018-2023, 40 backtests):
+
+| Plazo | mediana | media | %pos |
+|-------|--------:|------:|-----:|
+| 3M | −8.7% | −13.0% | 30% |
+| 6M | −6.6% | +4.9% | 40% |
+| 1Y | +5.4% | +29.9% | 60% |
+| 2Y | +25.6% | +132.9% | 80% |
+| **GLOBAL** | **+3.0%** | **+38.7%** | 52% (Sharpe 0.25, DD −25.9%, win 57%) |
+
+Las 10 pruebas a 2Y ordenadas: `−26, −22, +12, +20, +22, +29, +147, +239, +371, +537` → la media (+132.9%) la disparan 3-4 pelotazos de cripto; **6/10 quedan por debajo de la media**. La mediana (+25.6%) es el caso típico. vs SPY: **Sharpe SPY 0.97 vs bot 0.25**; el bot solo supera al SPY en el **42%** de ventanas.
+
+### Fase 2 — Palancas de mejora probadas (todas RECHAZADAS vs baseline Sharpe 0.25)
+
+| Palanca | Resultado dev | Veredicto |
+|---------|---------------|-----------|
+| Universo diversificado (bonos TLT/IEF, oro GLD, materias primas DBC) + gate y cap por clase | Sharpe −0.48, ret_avg −10.7% | **RECHAZADO** (peor; 2022 hundió también los bonos) |
+| Señal TSMOM multi-lookback (1/3/6/12m) | Sharpe −0.38, win 27% | **RECHAZADO** (no encaja con el TP/SL afinado para SMA) |
+| Sizing por riesgo (inverse-vol + vol-target) | Sharpe 0.16, ret_avg +17.8%, DD −21.6% | recorta drawdown pero baja la media; NO mejora el Sharpe |
+| Holdings largos (max_hold 252/504/sin tope) | ret_avg +17.9% / +0.4% / −3.6% | **RECHAZADO** (empeora monótonamente; el cap de 120d tomaba beneficios antes de las reversiones) |
+| div_full (diversificado + TSMOM + sizing) | Sharpe −0.74 | **RECHAZADO** |
+
+**Deflated Sharpe Ratio (Bailey & López de Prado):** con ~50-100 configuraciones probadas a lo largo del proyecto, el Sharpe esperado por puro azar es **0.82-0.92** — por encima del 0.25 del baseline. El propio baseline ya está sobreajustado a estas ventanas; seguir tuneando = overfitting garantizado.
+
+Añadido como infraestructura (todo default-off, sin cambiar el comportamiento base): benchmarks realistas (SPY y 60/40) en el backtest; modos de universo `famous`/`diversified`/`broad_random`; opciones `sizing_mode`, `signal_mode`, `trailing_stop_atr`, `disable_take_profit`, `max_per_class`, `max_position_pct`.
+
+### Fase 3 — Variante agresiva de máxima media + LOCKBOX 2024-2025 (out-of-sample puro)
+
+Hipótesis: una variante agresiva (caps de posición 0.40, concentración top-3, más exposición bruta) podría subir la media; se valida en datos NUNCA vistos en el estudio (2024-2025).
+
+`aggr_max` (max_position_pct 0.40, top-3):
+
+| | mediana | media | Sharpe | bate SPY |
+|---|--------:|------:|-------:|---------:|
+| DEV 2018-2023 (visto) | 0.0% | +21.9% | 0.10 | 40% |
+| **LOCKBOX 2024-2025 (no visto)** | **−37.4%** | **−29.2%** | **−0.91** | 4% |
+
+Baseline en el mismo lockbox: `aggr_plus` → mediana **−23.9%**, media **−24.5%**, Sharpe **−0.91**, %pos 8%. (SPY en ese periodo: **+9.8%**.)
+
+**HALLAZGO DEFINITIVO:**
+1. La variante agresiva EMPEORA la media fuera de muestra (−37% vs −24% del baseline). **RECHAZADA.**
+2. El bot ENTERO no generaliza: en 2024-2025 pierde ~−24% de media mientras comprar SPY daba +10%; le gana al SPY solo en el 4% de las ventanas. La rentabilidad de 2018-2023 era **overfitting + beta cripto**, no edge real.
+
+### Lecciones / decisión
+
+- Analogía: el "examen de práctica" (2018-2023, ventanas con las que se calibró) daba buena nota; el "examen real" (2024-2025, preguntas nuevas) lo suspende. Colapso clásico por overfitting, ahora demostrado con datos OOS.
+- La media alta era hindsight (cripto 2020-21), no repetible a voluntad.
+- **Decisión: NO seguir buscando configuraciones rentables sobre estas ventanas** — sería overfitting y el lockbox lo delata. El valor del trabajo es el sistema completo + la metodología rigurosa (sin look-ahead, test de supervivencia, benchmarks justos, Deflated Sharpe, lockbox OOS) + el hallazgo honesto: ni ML+LLM+multiagente bate al indexado pasivo en riesgo-ajustado (coherente con Fama / mercado eficiente).
+- Documentado además en `memoria/RESULTADOS_HONESTOS.md` y `memoria/MEMORIA_TFG.md`.
+
+### Comandos reproducibles
+
+```
+PORT=5057 TFG_DISABLE_TF=1 TFG_LIGHTWEIGHT=1 .venv/bin/python -u api.py &
+# dev (2018-2023)
+.venv/bin/python -u tools/run_performance_grid.py --variant aggr_plus
+.venv/bin/python -u tools/run_performance_grid.py --variant aggr_max
+# lockbox out-of-sample (2024-2025)
+.venv/bin/python -u tools/run_performance_grid.py --variant aggr_plus --lockbox
+.venv/bin/python -u tools/run_performance_grid.py --variant aggr_max --lockbox
+```
+
+---
