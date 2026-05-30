@@ -3254,7 +3254,6 @@ def paper_autonomous_backtest():
         bh_final_val   = float(bh_vals[-1]) if bh_vals else init_cap
         bh_ret_pct     = (bh_final_val - init_cap) / init_cap * 100
 
-        # Benchmarks realistas sobre el periodo real del test (SPY y 60/40 SPY+TLT).
         bench = _benchmark_metrics(loader, all_dates[0], all_dates[-1])
         spy_ret_b = bench['spy_return_pct']
         sf_ret_b  = bench['sixtyforty_return_pct']
