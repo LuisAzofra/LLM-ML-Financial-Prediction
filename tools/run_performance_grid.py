@@ -100,6 +100,28 @@ DIVERSIFIED = {**AGGR_PLUS,
 VARIANT_CONFIGS['diversified'] = ('DIVERSIFIED_XASSET', DIVERSIFIED,
                                   '/tmp/perf_grid_diversified_result.json')
 
+AGGR_PLUS_SIZE = {**AGGR_PLUS,
+                  'sizing_mode': 'inverse_vol',
+                  'enable_vol_target_overlay': True,
+                  'vol_target_overlay_annual': 0.15}
+VARIANT_CONFIGS['aggr_plus_size'] = ('AGGR_PLUS_RISKSIZE', AGGR_PLUS_SIZE,
+                                     '/tmp/perf_grid_aggr_plus_size_result.json')
+
+AGGR_PLUS_TSMOM = {**AGGR_PLUS,
+                   'signal_mode': 'tsmom',
+                   'signal_percentile': 0.40}
+VARIANT_CONFIGS['aggr_plus_tsmom'] = ('AGGR_PLUS_TSMOM', AGGR_PLUS_TSMOM,
+                                      '/tmp/perf_grid_aggr_plus_tsmom_result.json')
+
+DIV_FULL = {**DIVERSIFIED,
+            'signal_mode': 'tsmom',
+            'signal_percentile': 0.40,
+            'sizing_mode': 'inverse_vol',
+            'enable_vol_target_overlay': True,
+            'vol_target_overlay_annual': 0.15}
+VARIANT_CONFIGS['div_full'] = ('DIV_FULL', DIV_FULL,
+                               '/tmp/perf_grid_div_full_result.json')
+
 # Tier 5: variante SWING (mode='swing', holding 1-14d, ATR stop ON, conf
 # floor exit). Hereda AGGR_PLUS (signal_pct=0.70, kelly=0.30, ETFs, topN
 # rotation) y le añade los flags swing.

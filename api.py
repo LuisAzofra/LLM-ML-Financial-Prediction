@@ -2091,6 +2091,7 @@ def paper_autonomous_backtest():
     #   · target_vol        =0.20  (compromise; 0.25 da +5pp pero +5pp drawdown)
     # Para mode='ml' los defaults se mantienen más conservadores.
     is_trend = (mode == 'trend')
+    signal_mode = str(body.get('signal_mode', 'sma')).lower()
     trend_reverse_exit  = bool(body.get('trend_reverse_exit', is_trend))
     disable_atr_stop    = bool(body.get('disable_atr_stop',   is_trend))
     disable_adx_filter  = bool(body.get('disable_adx_filter', False))
@@ -2314,21 +2315,39 @@ def paper_autonomous_backtest():
                     # Tier 5: 'swing' usa la misma señal pero sale más rápido en el
                     # loop principal (ver `max_holding_days_swing`, `conf_floor`).
                     tdf = df[df.index >= start_dt].copy()
+                    is_tsmom   = (signal_mode == 'tsmom')
+                    close_full = df['Close'].to_numpy(dtype=float)
+                    base_pos   = len(df) - len(tdf)
+                    tsmom_lookbacks = (21, 63, 126, 252)
                     date_map = {}
                     for j in range(len(tdf)):
                         idx = tdf.index[j]
                         ds  = str(idx.date()) if hasattr(idx, 'date') else str(idx)[:10]
                         sma50  = tdf['SMA_50'].iloc[j]   if 'SMA_50'  in tdf.columns else np.nan
                         sma200 = tdf['SMA_200'].iloc[j]  if 'SMA_200' in tdf.columns else np.nan
-                        if pd.isna(sma50) or pd.isna(sma200) or sma200 <= 0:
-                            continue
-                        # trend_strength positivo = uptrend, negativo = downtrend
-                        trend_strength = float(sma50 / sma200 - 1.0)
-                        # Mantener mínimo 0.015 de magnitud para pasar los gates
-                        # de la fase de selección (>= 0.008). Conf 0.55-0.85 según fuerza.
-                        sign_t = 1.0 if trend_strength >= 0 else -1.0
-                        pred_t = sign_t * max(abs(trend_strength), 0.015)
-                        conf_t = 0.55 + min(abs(trend_strength) * 5.0, 0.30)
+                        if is_tsmom:
+                            p = base_pos + j
+                            signs = []
+                            for lb in tsmom_lookbacks:
+                                if p - lb >= 0 and close_full[p - lb] > 0:
+                                    signs.append(np.sign(close_full[p] / close_full[p - lb] - 1.0))
+                            mom_score = float(np.mean(signs)) if signs else 0.0
+                            pred_t = mom_score
+                            conf_t = 0.5 + 0.5 * min(abs(mom_score), 1.0)
+                            sma50_v  = float(sma50)  if not pd.isna(sma50)  else None
+                            sma200_v = float(sma200) if not pd.isna(sma200) else None
+                        else:
+                            if pd.isna(sma50) or pd.isna(sma200) or sma200 <= 0:
+                                continue
+                            # trend_strength positivo = uptrend, negativo = downtrend
+                            trend_strength = float(sma50 / sma200 - 1.0)
+                            # Mantener mínimo 0.015 de magnitud para pasar los gates
+                            # de la fase de selección (>= 0.008). Conf 0.55-0.85 según fuerza.
+                            sign_t = 1.0 if trend_strength >= 0 else -1.0
+                            pred_t = sign_t * max(abs(trend_strength), 0.015)
+                            conf_t = 0.55 + min(abs(trend_strength) * 5.0, 0.30)
+                            sma50_v  = float(sma50)
+                            sma200_v = float(sma200)
                         date_map[ds] = {
                             'pred':       pred_t,
                             'conf':       conf_t,
@@ -2336,8 +2355,8 @@ def paper_autonomous_backtest():
                             'low':        float(tdf['Low'].iloc[j])  if 'Low'  in tdf.columns else float(tdf['Close'].iloc[j]),
                             'high':       float(tdf['High'].iloc[j]) if 'High' in tdf.columns else float(tdf['Close'].iloc[j]),
                             'atr':        float(tdf['ATR'].iloc[j])        if ('ATR'        in tdf.columns and not pd.isna(tdf['ATR'].iloc[j]))        else float(tdf['Close'].iloc[j]) * 0.015,
-                            'sma200':     float(sma200),
-                            'sma50':      float(sma50),
+                            'sma200':     sma200_v,
+                            'sma50':      sma50_v,
                             'adx':        float(tdf['ADX'].iloc[j])        if ('ADX'        in tdf.columns and not pd.isna(tdf['ADX'].iloc[j]))        else None,
                             'volatility': float(tdf['Volatility'].iloc[j]) if ('Volatility' in tdf.columns and not pd.isna(tdf['Volatility'].iloc[j])) else 0.20,
                         }
@@ -2346,7 +2365,8 @@ def paper_autonomous_backtest():
                         asset_r2[sym]     = 1.0   # neutro: sin ML que evaluar
                         asset_val_r2[sym] = 1.0   # always-pass del R² gate en trend mode
                         trained_ok.append(sym)
-                        logger.info(f"  {sym}: {len(date_map)} días test · TREND-MODE (SMA50/SMA200)")
+                        _sig_label = 'TSMOM (multi-lookback)' if is_tsmom else 'SMA50/SMA200'
+                        logger.info(f"  {sym}: {len(date_map)} días test · TREND-MODE ({_sig_label})")
                     continue  # siguiente activo
 
                 # ── Modo ML (default) ────────────────────────────────────────────
@@ -3165,6 +3185,7 @@ def paper_autonomous_backtest():
                 'kelly_scale': kelly_sc,
                 'allow_short': allow_short,
                 'mode': mode,
+                'signal_mode': signal_mode,
                 'trend_reverse_exit': trend_reverse_exit,
                 'disable_atr_stop': disable_atr_stop,
                 'disable_adx_filter': disable_adx_filter,
