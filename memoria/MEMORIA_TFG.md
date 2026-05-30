@@ -61,8 +61,8 @@ Finally, a quantitative performance evaluation is carried out using metrics of e
 
 5. Resultados y Evaluación
    5.1. Métricas de Evaluación
-   5.2. Resultados del Backtesting
-   5.3. Análisis de Robustez
+   5.2. Protocolo de Evaluación Riguroso
+   5.3. Resultados del Backtesting
    5.4. Discusión de Resultados
 
 6. Conclusiones y Trabajo Futuro
@@ -82,7 +82,7 @@ Anexos
 
 Los mercados financieros han experimentado una transformación radical en las últimas décadas con la llegada de la computación de alta frecuencia, el big data y, más recientemente, la inteligencia artificial avanzada. La pregunta fundamental que motiva este trabajo es: ¿hasta qué punto son predecibles los mercados financieros utilizando técnicas modernas de inteligencia artificial?
 
-La hipótesis de mercados eficientes, formulada por Eugene Fama en 1970 [18], postula que los precios de los activos reflejan toda la información disponible, haciendo imposible obtener rendimientos consistentemente superiores al mercado. Sin embargo, la evidencia empírica reciente sugiere que, aunque los mercados sean altamente eficientes, existen oportunidades de "alpha" —rendimientos superiores ajustados por riesgo— que pueden ser explotadas mediante técnicas sofisticadas de análisis cuantitativo [19].
+La hipótesis de mercados eficientes, formulada por Eugene Fama en 1970 [17], postula que los precios de los activos reflejan toda la información disponible, haciendo imposible obtener rendimientos consistentemente superiores al mercado. Sin embargo, la evidencia empírica reciente sugiere que, aunque los mercados sean altamente eficientes, existen oportunidades de "alpha" —rendimientos superiores ajustados por riesgo— que pueden ser explotadas mediante técnicas sofisticadas de análisis cuantitativo [18].
 
 La irrupción de los Grandes Modelos de Lenguaje (LLMs) ha abierto nuevas posibilidades en el análisis financiero. Estos modelos, entrenados en vastos corpus de texto, pueden procesar noticias, informes de ganancias, redes sociales y otros datos no estructurados para extraer señales de trading que los modelos numéricos tradicionales no pueden capturar [1].
 
@@ -188,6 +188,8 @@ Los datos de precios históricos se obtienen mediante la librería `yfinance`, q
 - **Período**: 3 años de datos históricos
 - **Frecuencia**: Diaria
 
+El sistema admite distintos modos de universo de activos. Además del universo de acciones individuales (modo `famous`), se incorporan dos opciones que se emplearán más adelante para la evaluación rigurosa: un **universo diversificado cross-asset** (`diversified`), que combina ETFs de renta variable, bonos (TLT, IEF), oro (GLD, SLV), materias primas (DBC), divisa (UUP) y criptoactivos (BTC, ETH), y un **universo amplio y aleatorio** (`broad_random`) muestreado de un snapshot histórico del S&P 500, destinado al test de sesgo de supervivencia descrito en el Capítulo 5.
+
 #### 3.2.2 Datos de Noticias
 
 Las noticias financieras se obtienen mediante RSS feeds de fuentes gratuitas:
@@ -206,6 +208,10 @@ Para el análisis de sentimiento y la interpretación de datos, se utiliza un LL
 1. **Ollama**: Ejecución local de modelos como Llama 3.2 o Mistral
 2. **Hugging Face Inference API**: Acceso gratuito con rate limits a modelos como Mistral-7B
 
+#### 3.2.4 Tratamiento Causal de los Datos
+
+Un requisito transversal del módulo de ingesta es la causalidad estricta: en ningún momento del histórico puede emplearse información que no estuviera disponible en esa fecha. Por ello, el relleno de huecos en las series de precios se realiza exclusivamente hacia delante (*forward-fill*): los valores ausentes se completan con el último dato conocido y los `NaN` iniciales se descartan en lugar de rellenarse con datos posteriores. Se evita expresamente el relleno hacia atrás (*backward-fill*) y la interpolación bidireccional, que introducirían precios futuros en el pasado. Este criterio resulta esencial para que el backtesting posterior sea representativo de las condiciones reales de operación.
+
 ### 3.3 Módulo de Machine Learning
 
 #### 3.3.1 Modelos Tradicionales
@@ -216,9 +222,11 @@ Se implementan tres modelos de ensemble para predicción de retornos:
 2. **XGBoost**: Gradient boosting optimizado
 3. **LightGBM**: Gradient boosting con histogram-based learning
 
+Para evitar la fuga de información (*data leakage*), el escalado de las variables se ajusta únicamente con los datos de entrenamiento y se aplica después al conjunto de test, en lugar de ajustarse sobre la totalidad de la serie antes de la partición temporal. En la predicción de volatilidad se añade además un *embargo* en el *target*, dejando un margen temporal entre entrenamiento y test que impide el solapamiento de ventanas. Sin estas precauciones, las métricas de evaluación quedan artificialmente infladas.
+
 #### 3.3.2 Modelo GARCH para Volatilidad
 
-El modelo GARCH(1,1) se implementa utilizando la librería `arch` [20]. La especificación del modelo es:
+El modelo GARCH(1,1) se implementa utilizando la librería `arch` [19]. La especificación del modelo es:
 
 $$\sigma_t^2 = \omega + \alpha \epsilon_{t-1}^2 + \beta \sigma_{t-1}^2$$
 
@@ -309,7 +317,7 @@ El sistema ha sido desarrollado en Python 3.9+ y utiliza las siguientes librerí
 
 ### 4.2 Implementación del Modelo GARCH
 
-La implementación del modelo GARCH se realiza mediante la librería `arch` [20]. El código principal es:
+La implementación del modelo GARCH se realiza mediante la librería `arch` [19]. El código principal es:
 
 ```python
 from arch import arch_model
@@ -331,7 +339,7 @@ results = garch.fit(disp='off')
 forecast = results.forecast(horizon=5)
 ```
 
-La elección de una distribución t de Student en lugar de una normal permite capturar mejor las colas pesadas características de los retornos financieros [21].
+La elección de una distribución t de Student en lugar de una normal permite capturar mejor las colas pesadas características de los retornos financieros [20].
 
 ### 4.3 Implementación del Sistema Multi-Agente
 
@@ -406,7 +414,25 @@ Las métricas utilizadas para evaluar el sistema son:
 - Payoff Ratio
 - Kelly Criterion
 
-### 5.2 Resultados del Backtesting
+En el cálculo de algunas de estas métricas se corrigieron definiciones erróneas detectadas en una primera implementación. El **ratio de Sortino** empleaba la desviación típica de los retornos negativos, que resta su propia media y descarta los días positivos, produciendo un valor arbitrario; se sustituyó por la *downside deviation* estándar, que penaliza únicamente los retornos por debajo del objetivo sobre el total de observaciones. El **VaR** mezclaba el estimador histórico y el paramétrico mediante un `max()` no estándar, y el **CVaR** podía quedar por debajo del VaR, violando la definición de *Expected Shortfall*; ambos se reformularon con el estimador empírico, garantizando la relación CVaR ≥ VaR.
+
+### 5.2 Protocolo de Evaluación Riguroso
+
+Una primera fase del trabajo reveló que las cifras de rentabilidad iniciales estaban contaminadas por varios errores metodológicos. Antes de medir el rendimiento real fue necesario corregirlos, ya que sin ello cualquier resultado es ruido. Las correcciones principales fueron:
+
+- **Fuga de información en el escalado** (descrita en la Sección 3.3): el *scaler* se ajustaba sobre train+test antes de la partición temporal.
+- **Look-ahead en la ingesta** (Sección 3.2.4): el relleno hacia atrás introducía precios futuros.
+- **Umbral de señal no causal**: el percentil que activaba las entradas se calculaba sobre toda la distribución de señales del periodo de test, empleando días futuros. Se corrigió a una ventana *expanding*, que en cada instante solo usa la información pasada.
+- **Curva de equity con calendarios mixtos**: al combinar activos con calendarios distintos (los criptoactivos cotizan en fin de semana y las acciones no), las posiciones de los símbolos sin barra ese día desaparecían del valor de cartera y reaparecían al siguiente, generando saltos fantasma de ±50% que inflaban el Sharpe, el Sortino y el *maximum drawdown*. Se corrigió mediante *forward-fill* del último cierre conocido. El efecto fue drástico: la volatilidad diaria de la curva pasó de un ~25% irreal a un ~1.7% coherente con los activos.
+- **Eliminación de un backtest con señales aleatorias**: se retiró un método que generaba señales con `np.random.choice` y aplicaba retornos del día siguiente (look-ahead), un *placeholder* sin valor evaluativo.
+
+Sobre esta base depurada, la evaluación adopta tres garantías adicionales. En primer lugar, para no sesgar las conclusiones a partir de una única ventana favorable, se utiliza una **cuadrícula multi-régimen**: 10 fechas de inicio entre 2018 y 2023 —que cubren la fase pre-COVID, el desplome de 2020, la recuperación, el mercado alcista de 2021, el bajista de 2022 y la recuperación de 2023— combinadas con 4 plazos de tenencia (3 meses, 6 meses, 1 año y 2 años), lo que arroja del orden de 280 backtests independientes. Para los plazos cortos se habilita además un **modo *swing*** implementado en el sistema, con periodos de tenencia de 1 a 14 días, salida por convicción y una tenencia mínima anti-*whipsaw*. En segundo lugar, se incorporan **benchmarks realistas**, ya que el *buy & hold* del propio universo (con criptoactivos) es un punto de comparación injusto: se añaden el SPY (comprar y mantener el S&P 500) y una cartera 60/40 (SPY/TLT con rebalanceo diario), junto con las métricas de *alpha* relativo. En tercer lugar, se realiza un **test de sesgo de supervivencia**, repitiendo la evaluación sobre el universo amplio y aleatorio del S&P 500 en lugar de sobre las acciones "famosas" elegidas a posteriori.
+
+Finalmente, la evaluación se acompaña de una **conciencia explícita del sobreajuste**. Dado el elevado número de configuraciones probadas, se emplea el *Deflated Sharpe Ratio* de Bailey y López de Prado para descontar el Sharpe esperado por puro azar, evitando confundir suerte con habilidad.
+
+### 5.3 Resultados del Backtesting
+
+#### 5.3.1 Resultado Ilustrativo en un Activo
 
 **Tabla 5.1: Resultados del Backtesting para AAPL (2021-2024)**
 
@@ -425,7 +451,7 @@ Las métricas utilizadas para evaluar el sistema son:
 
 Los resultados muestran un rendimiento positivo pero modesto, con un Sharpe Ratio de 0.22 que indica un rendimiento ajustado por riesgo por debajo del mercado (S&P 500 tiene Sharpe ~0.6 históricamente). El Maximum Drawdown del 46.57% es considerablemente alto, lo que sugiere que la estrategia necesita mejoras en la gestión de riesgo.
 
-### 5.3 Análisis de Robustez
+#### 5.3.2 Análisis de Robustez por Régimen de Volatilidad
 
 Se realizó un análisis de robustez por regímenes de volatilidad:
 
@@ -437,17 +463,64 @@ Se realizó un análisis de robustez por regímenes de volatilidad:
 | Volatilidad Normal | 0.18 | -28.7% |
 | Alta Volatilidad | -0.32 | -51.2% |
 
-El análisis revela que la estrategia funciona mejor en regímenes de baja volatilidad, pero sufre significativamente durante períodos de alta volatilidad. Esto es consistente con la literatura sobre estrategias de momentum [22].
+El análisis revela que la estrategia funciona mejor en regímenes de baja volatilidad, pero sufre significativamente durante períodos de alta volatilidad. Esto es consistente con la literatura sobre estrategias de momentum [21].
+
+#### 5.3.3 Rendimiento por Plazo de Tenencia en la Cuadrícula Multi-Régimen
+
+Evaluada la variante principal del sistema (un *trend-following* multi-activo con rotación por momentum) sobre la cuadrícula completa, los resultados deben leerse distinguiendo entre **media** y **mediana**, porque divergen considerablemente. La Tabla 5.3 resume el rendimiento por plazo de tenencia frente al SPY.
+
+**Tabla 5.3: Rendimiento por Plazo de Tenencia (Media vs Mediana) frente al SPY**
+
+| Plazo | Mediana (caso típico) | Media (inflada por cola) | % de ventanas en positivo | SPY (mediana) |
+|-------|----------------------:|-------------------------:|--------------------------:|--------------:|
+| 3 meses | −8.7% | −13.0% | 30% | +3.1% |
+| 6 meses | −6.6% | +4.9% | 40% | +11.8% |
+| 1 año | +5.4% | +29.9% | 60% | +15.7% |
+| 2 años | +25.6% | +132.9% | 80% | +32.8% |
+
+La discrepancia entre media y mediana no es anecdótica. Ordenadas de menor a mayor, las 10 pruebas a 2 años fueron −26%, −22%, +12%, +20%, +22%, +29%, +147%, +239%, +371% y +537%. La media (+132.9%) está disparada por tres o cuatro aciertos de cola en criptoactivos durante 2020-2021, de modo que **6 de las 10 pruebas quedaron por debajo de la media**. Por tanto, para juzgar la utilidad real del sistema debe emplearse la mediana (+25.6% a 2 años), que refleja el resultado típico, y no la media, sesgada al alza.
+
+#### 5.3.4 Comparación frente a la Inversión Indexada Pasiva
+
+La pregunta determinante no es si el sistema gana dinero, sino si supera a la alternativa trivial de comprar y mantener un índice. La respuesta es matizada:
+
+- **En términos absolutos**, el sistema es rentable a plazos largos: a 2 años termina en positivo el 80% de las veces (+25.6% típico). A corto plazo (≤6 meses) típicamente pierde.
+- **Frente a comprar y mantener el SPY**, no compensa. En el caso típico el SPY rinde igual o más (a 2 años, SPY +32.8% frente al +25.6% del sistema), y el sistema solo supera al SPY en el **42%** de las ventanas —prácticamente un cara o cruz— asumiendo además mucho más riesgo.
+- **Ajustado por riesgo**, la diferencia es nítida: el Sharpe del SPY es 0.97 frente al 0.25 del sistema. El índice es aproximadamente cuatro veces mejor por unidad de riesgo.
+
+#### 5.3.5 Palancas de Mejora Evaluadas
+
+Con el objetivo de superar al *baseline*, se probaron de forma rigurosa varias palancas de mejora, midiendo cada una sobre la cuadrícula completa (Tabla 5.4).
+
+**Tabla 5.4: Palancas de Mejora y su Efecto sobre el Sharpe Medio**
+
+| Palanca | Resultado | Sharpe medio |
+|---------|-----------|-------------:|
+| Baseline (trend-following + rotación) | referencia | 0.25 |
+| Universo diversificado (bonos / oro / materias primas) | peor | −0.48 |
+| Señal TSMOM multi-*lookback* | peor | −0.38 |
+| Sizing por riesgo (*inverse-vol* + *vol-target*) | menor drawdown, menor retorno | 0.16 |
+| Holdings más largos (252 / 504 / sin tope) | peor (devuelve ganancias en *bear*) | ≤0.07 |
+
+Ninguna palanca mejora la rentabilidad ajustada por riesgo del *baseline*. Además, el propio *baseline* está probablemente sobreajustado: el *Deflated Sharpe Ratio* indica que, con el número de configuraciones probadas (del orden de 50-100), el Sharpe esperado por puro azar es 0.82-0.92, por encima del 0.25 observado. Seguir buscando configuraciones que "ganen" en estas ventanas sería sobreajuste, no una mejora real.
+
+El *tradeoff* entre riesgo y rentabilidad resulta ineludible. El *sizing* por riesgo recorta el *drawdown* (de −27.9% a −23.9% a 2 años) pero reduce la media (de +132.9% a +71.3%), porque esa media elevada procede precisamente de la exposición volátil (criptoactivos) que el control de riesgo modera. No existe ninguna configuración que aumente el retorno y reduzca el riesgo simultáneamente.
+
+#### 5.3.6 Test de Sesgo de Supervivencia
+
+Sobre el universo amplio y aleatorio del S&P 500 —en lugar de las acciones elegidas a posteriori—, la estrategia **pierde dinero a todos los plazos** (retorno medio en torno al −11%, superando al *buy & hold* solo en el ~8% de los casos). Este resultado confirma que buena parte del rendimiento aparente del universo reducido se debía a la selección de activos en retrospectiva, y no a una habilidad genuina del sistema.
 
 ### 5.4 Discusión de Resultados
 
 Los resultados obtenidos confirman varios hallazgos de la literatura:
 
-1. **Dificultad de la predicción**: Los modelos ML muestran R² negativo, indicando que la predicción de retornos exactos es extremadamente difícil, consistente con la hipótesis de mercados eficientes en forma semi-fuerte [18].
+1. **Dificultad de la predicción**: Los modelos ML muestran R² negativo, indicando que la predicción de retornos exactos es extremadamente difícil, consistente con la hipótesis de mercados eficientes en forma semi-fuerte [17].
 
-2. **Volatilidad predecible**: El modelo GARCH muestra capacidad para predecir volatilidad, consistente con la literatura sobre clustering de volatilidad [21].
+2. **Volatilidad predecible**: El modelo GARCH muestra capacidad para predecir volatilidad, consistente con la literatura sobre clustering de volatilidad [20].
 
 3. **Valor del sentimiento**: El análisis de sentimiento mediante LLM proporciona información adicional valiosa, especialmente durante eventos de mercado significativos.
+
+4. **Ausencia de alpha sostenible ajustado por riesgo**: una vez eliminados los sesgos metodológicos y evaluado el sistema sobre la cuadrícula multi-régimen y un universo sin sesgo de supervivencia, la sofisticación añadida (ML, LLM y arquitectura multi-agente) no se traduce en una ventaja sobre la inversión indexada pasiva en términos ajustados por riesgo. Este hallazgo es plenamente coherente con la hipótesis del mercado eficiente [17].
 
 ---
 
@@ -465,7 +538,7 @@ Este Trabajo Fin de Grado ha desarrollado e implementado un sistema híbrido com
 
 4. **LLM Gratuito** (Ollama/HuggingFace) para análisis de sentimiento e interpretación cualitativa.
 
-5. **Backtesting Económico Riguroso** con métricas profesionales (Sharpe, Sortino, Calmar, Ulcer Index).
+5. **Backtesting Económico Riguroso** con métricas profesionales (Sharpe, Sortino, Calmar, Ulcer Index) y un protocolo de evaluación libre de sesgos.
 
 Las principales conclusiones son:
 
@@ -475,83 +548,89 @@ Las principales conclusiones son:
 
 - El sistema multi-agente con LLM proporciona un marco robusto para integrar análisis cuantitativo y cualitativo.
 
-- La estrategia de backtesting muestra rendimiento positivo pero con riesgo elevado, indicando la necesidad de mejorar la gestión de riesgo.
+- Una vez corregidos los sesgos metodológicos, el sistema **gana dinero en términos absolutos a plazos largos** (positivo en el 80% de las ventanas a 2 años, con un +25.6% típico), pero **no bate al indexado pasivo ajustando por riesgo** (Sharpe 0.25 frente al 0.97 del SPY) y solo supera al SPY en el 42% de las ventanas. Su media elevada depende de aciertos de cola en criptoactivos no repetibles a voluntad.
+
+- En un universo realista sin sesgo de supervivencia el sistema deja de ser rentable, lo que confirma que parte del rendimiento aparente procedía de la selección de activos en retrospectiva.
+
+Este resultado es coherente con la hipótesis del mercado eficiente y con la literatura: un sistema técnico operando sobre datos diarios no obtiene una ventaja estructural sostenible en estos activos. Lejos de constituir un fracaso, se trata de un resultado válido y defendible. El valor del trabajo reside en tres elementos: (1) un **sistema completo y funcional** *end-to-end* (datos reales → ML + GARCH → multi-agente con LLM → gestión de riesgo → backtesting → interfaz); (2) una **metodología de evaluación rigurosa**, sin *look-ahead*, con test de sesgo de supervivencia, benchmarks justos y conciencia del sobreajuste (*Deflated Sharpe* / PBO); y (3) un **hallazgo honesto**: la sofisticación no se traduce en alpha sobre el indexado pasivo en términos ajustados por riesgo.
 
 ### 6.2 Limitaciones
 
 El trabajo presenta las siguientes limitaciones:
 
-1. **Datos históricos limitados**: El análisis se basa en 3 años de datos, lo cual puede ser insuficiente para capturar todos los regímenes de mercado.
+1. **Granularidad de los datos**: el análisis emplea datos diarios de Yahoo Finance, sin información intradía ni fuentes de datos alternativos que pudieran aportar señales adicionales.
 
 2. **Costos de transacción simplificados**: El modelo asume comisiones fijas, sin considerar slippage real ni impacto de mercado.
 
 3. **Disponibilidad del LLM**: El sistema depende de Ollama ejecutándose localmente, lo cual puede no ser práctico para todos los usuarios.
 
-4. **Overfitting potencial**: Los modelos ML pueden estar sobreajustados a los datos históricos.
+4. **Universo limitado y sobreajuste**: aunque la evaluación incorpora un test de sesgo de supervivencia que ya evidencia la fragilidad del sistema fuera del conjunto reducido de activos, el universo sigue siendo limitado. El *Deflated Sharpe Ratio* sugiere además que el rendimiento del *baseline* es indistinguible del esperado por azar dado el número de configuraciones exploradas.
 
 ### 6.3 Líneas Futuras de Investigación
 
 Se proponen las siguientes líneas de investigación futura:
 
-1. **Integración con LLMs más potentes**: Evaluar el uso de GPT-4 o Claude para comparar el rendimiento.
+1. **Validación con *lockbox* temporal**: reservar el periodo 2024 en adelante como datos nunca vistos durante el desarrollo, de forma que constituya una prueba final genuinamente fuera de muestra.
 
-2. **Expansión de patrones chartistas**: Incluir patrones más complejos como ondas de Elliott y patrones armónicos.
+2. **Estimación de la probabilidad de sobreajuste**: emplear *Combinatorial Purged Cross-Validation* para calcular la *Probability of Backtest Overfitting* (PBO) de cualquier mejora propuesta antes de darla por buena, evitando confundir suerte con habilidad.
 
-3. **Optimización de hiperparámetros**: Utilizar Optuna o Ray Tune para optimizar los parámetros de los modelos.
+3. **Reorientación del sistema**: explorar su uso como herramienta de **gestión de riesgo** (capturar la subida del mercado con menor *drawdown*) o de **análisis y apoyo a la decisión** (el motor multi-agente con LLM como soporte al inversor), donde su utilidad es más defendible que como generador de alpha.
 
-4. **Trading en tiempo real**: Implementar el sistema para operar en mercados reales con paper trading.
+4. **Integración con LLMs más potentes**: Evaluar el uso de GPT-4 o Claude para comparar el rendimiento.
 
-5. **Dashboard interactivo**: Desarrollar una interfaz web para visualizar resultados y tomar decisiones.
+5. **Expansión de patrones chartistas**: Incluir patrones más complejos como ondas de Elliott y patrones armónicos.
 
-6. **Análisis de múltiples activos**: Extender el sistema para operar carteras diversificadas.
+6. **Optimización de hiperparámetros**: Utilizar Optuna o Ray Tune para optimizar los parámetros de los modelos.
+
+7. **Trading en tiempo real**: Implementar el sistema para operar en mercados reales con paper trading.
+
+8. **Dashboard interactivo**: Desarrollar una interfaz web para visualizar resultados y tomar decisiones.
 
 ---
 
 ## Referencias
 
-[1] Y. Liu et al., "The New Quant: A Survey of Large Language Models in Financial Prediction and Trading," *arXiv preprint*, 2025.
+[1] W. Fu, "The New Quant: A Survey of Large Language Models in Financial Prediction and Trading," *arXiv preprint*, 2025.
 
-[2] Y. Liu et al., "QuantAgents: Towards Multi-agent Financial System via Simulated Trading," in *Proceedings of EMNLP 2025*, 2025.
+[2] X. Li, Y. Zeng, X. Xing, J. Xu y X. Xu, "QuantAgents: Towards Multi-agent Financial System via Simulated Trading," in *Proceedings of EMNLP 2025*, 2025.
 
-[3] J. Zhang et al., "HedgeAgents: A Balanced-aware Multi-agent Financial Trading System," *OpenReview*, 2025.
+[3] X. Li, Y. Zeng, X. Xing, J. Xu y X. Xu, "HedgeAgents: A Balanced-aware Multi-agent Financial Trading System," in *The Web Conference (WWW)*, 2025.
 
-[4] B. N. Oreshkin et al., "N-BEATS: Neural basis expansion analysis for interpretable time series forecasting," *ICLR*, 2020.
+[4] B. N. Oreshkin, D. Carpov, N. Chapados y Y. Bengio, "N-BEATS: Neural Basis Expansion Analysis for Interpretable Time Series Forecasting," in *ICLR*, 2020.
 
-[5] Y. Nie et al., "A Time Series is Worth 64 Words: Long-term Forecasting with Transformers," *ICLR*, 2023.
+[5] Y. Nie, N. H. Nguyen, P. Sinthong y J. Kalagnanam, "A Time Series is Worth 64 Words: Long-term Forecasting with Transformers," in *ICLR*, 2023.
 
-[6] Y. Li et al., "Prompting Large Language Models for Zero-Shot Domain Adaptation in Sentiment Analysis," *ACL*, 2024.
+[6] Y. Li et al., "Prompting Large Language Models for Zero-Shot Domain Adaptation in Sentiment Analysis," in *ACL*, 2024.
 
-[7] H. Wang et al., "FinAgent: A Multimodal Foundation Agent for Financial Trading," *NeurIPS Workshop*, 2024.
+[7] W. Zhang, L. Zhao, H. Xia, S. Sun, J. Sun et al., "FinAgent: A Multimodal Foundation Agent for Financial Trading," in *NeurIPS Workshop*, 2024.
 
-[8] B. Lim et al., "Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting," *International Journal of Forecasting*, 2021.
+[8] B. Lim, S. O. Arik, N. Loeff y T. Pfister, "Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting," *International Journal of Forecasting*, 2021.
 
-[9] Y. Wang et al., "DeepTrader: A Deep Reinforcement Learning Approach for Risk-Return Balanced Portfolio Management," *AAAI*, 2021.
+[9] Z. Wang, B. Huang, S. Tu, K. Zhang y L. Xu, "DeepTrader: A Deep Reinforcement Learning Approach for Risk-Return Balanced Portfolio Management," in *AAAI*, 2021.
 
-[10] J. Gao et al., "AlphaMix+: Improving AlphaZero with Mixture-of-Experts," *NeurIPS*, 2022.
+[10] S. Mohammadi Dashtaki et al., "HSIF: A Transformer-Based Cross-Attention Framework for Cryptocurrency Trend Forecasting via Multimodal Sentiment-Market Fusion," *IEEE Access*, 2024.
 
-[11] X. Chen et al., "HSIF: A Transformer-Based Cross-Attention Network for Bitcoin Price Prediction," *IEEE Transactions on Neural Networks and Learning Systems*, 2024.
+[11] S. Celik, "Predicting Cryptocurrency Returns: An Integrated Dataset Approach for Short-Term Forecasting," *Tesis de Máster, Aalto University*, 2025.
 
-[12] M. Kärkkäinen, "Predicting Cryptocurrency Returns: An Integrated Dataset Approach for Short-Term Forecasting," *Master's Thesis, Aalto University*, 2025.
+[12] W. W. Li, H. Kim, M. Cucuringu y T. Ma, "Can LLM-based Financial Investing Strategies Outperform the Market in Long Run?," in *KDD*, 2026.
 
-[13] A. Smith et al., "FINSABER: A Framework for Systematic Evaluation of LLM-Based Trading Strategies," *KDD*, 2026.
+[13] J. Shi y B. Hollifield, "Predictive Power of LLMs in Financial Markets," *arXiv preprint*, 2024.
 
-[14] R. Johnson et al., "Predictive Power of LLMs in Financial Markets: A Critical Analysis," *arXiv preprint*, 2024.
+[14] J. García, "Tecnología Criptográfica y Negociación Organizada de Criptoactivos," *Universidad Pontificia Comillas*, 2024.
 
-[15] J. García, "Tecnología Criptográfica y Negociación Organizada de Criptoactivos," *Universidad Pontificia Comillas*, 2024.
+[15] D. Cano Alvira, "Proyecto TFM: Predicción de series temporales con modelos de IA," *Structuralia*, 2024.
 
-[16] A. Martínez, "Proyecto TFM: Predicción de series temporales con modelos de IA," *Structuralia*, 2024.
+[16] L. Fernández, "IA Explicable: Programación Probabilística con PyMC para Prevención de Blanqueo de Capitales," *Universidad Autónoma de Madrid*, 2024.
 
-[17] L. Fernández, "IA Explicable: Programación Probabilística con PyMC para Prevención de Blanqueo de Capitales," *UAM*, 2024.
+[17] E. F. Fama, "Efficient Capital Markets: A Review of Theory and Empirical Work," *The Journal of Finance*, vol. 25, no. 2, pp. 383-417, 1970.
 
-[18] E. F. Fama, "Efficient Capital Markets: A Review of Theory and Empirical Work," *The Journal of Finance*, vol. 25, no. 2, pp. 383-417, 1970.
+[18] A. W. Lo, "Reconciling Efficient Markets with Behavioral Finance: The Adaptive Markets Hypothesis," *Journal of Investment Consulting*, vol. 7, no. 2, pp. 21-44, 2005.
 
-[19] A. W. Lo, "Reconciling Efficient Markets with Behavioral Finance: The Adaptive Markets Hypothesis," *Journal of Investment Consulting*, vol. 7, no. 2, pp. 21-44, 2005.
+[19] K. Sheppard, "arch: Arch models in Python," 2023.
 
-[20] K. Sheppard, "arch: Arch models in Python," 2023. [Online]. Available: https://github.com/bashtage/arch
+[20] R. F. Engle, "Autoregressive Conditional Heteroscedasticity with Estimates of the Variance of United Kingdom Inflation," *Econometrica*, vol. 50, no. 4, pp. 987-1007, 1982.
 
-[21] R. F. Engle, "Autoregressive Conditional Heteroscedasticity with Estimates of the Variance of United Kingdom Inflation," *Econometrica*, vol. 50, no. 4, pp. 987-1007, 1982.
-
-[22] J. Asness, "Value and Momentum Everywhere," *Journal of Finance*, vol. 68, no. 3, pp. 929-985, 2013.
+[21] C. S. Asness, T. J. Moskowitz y L. H. Pedersen, "Value and Momentum Everywhere," *Journal of Finance*, vol. 68, no. 3, pp. 929-985, 2013.
 
 ---
 
