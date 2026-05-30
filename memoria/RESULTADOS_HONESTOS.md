@@ -133,3 +133,46 @@ El valor del proyecto reside en:
   (capturar subida con menor drawdown) o de **análisis/decisión** (el motor
   multi-agente + LLM como apoyo), donde su utilidad es más defendible que como
   generador de alpha.
+
+## 9. Tier 8 — mejoras honestas sobre Faber-QQQ, validadas fuera de muestra
+
+Partiendo de la mejor configuración honesta (Faber-QQQ: mantener QQQ cuando está
+sobre su SMA200, si no efectivo) se realizó el trabajo futuro de la sección 8: se
+endureció el protocolo (muchas fechas **aleatorias con semilla** por horizonte,
+2 semanas a 2 años; universos **DESARROLLO 2014-2023** y **LOCKBOX 2024-2025**
+disjuntos en el tiempo; alpha frente a SPY/QQQ/60-40; caché de precios causal;
+**test de causalidad** automático y **Deflated Sharpe**) y se buscaron mejoras
+reales validadas en el lockbox una sola vez.
+
+**S1 — Parking en letras del Tesoro (ACEPTADO).** El baseline dejaba el efectivo
+al 0% mientras estaba fuera de mercado (~20-30% del tiempo). Acreditar el tipo
+libre de riesgo (`^IRX`, con retardo de un día, causal) sobre ese efectivo es
+contabilidad correcta, no una apuesta. Mejora estricta y significativa sobre
+Faber-QQQ en todos los horizontes, en desarrollo y en lockbox (Δretorno
++0.36 / +0.68 / +1.12 pp a 6M / 1A / 2A en lockbox, IC95% excluye el 0,
+**180/180 ventanas nunca empeoran**, drawdown no aumenta). Mayor en lockbox por
+los tipos al 4-5% de 2024-2025. Sin parámetro ajustado ⇒ sin riesgo de overfitting.
+
+**Resultado destacado vs benchmark (lockbox 2024-2025, out-of-sample).**
+Faber-QQQ+parking **bate al 60/40 de forma robusta**: alpha +7.99 pp a 1 año y
+**+19.34 pp a 2 años, ganándole al 60/40 el 100% de las ventanas**, con drawdown
+medio ~−13% (frente a la caída de un QQQ puro). Frente al SPY **empata o supera
+ligeramente** (alpha +0.61 / +0.78 pp a 1A / 2A) con menos drawdown. Matiz
+honesto: contra el 60/40 esto es sobre todo **beta de crecimiento + filtro de
+caídas**, no alpha; y **sigue sin batir a su propio subyacente (QQQ) en un bull**.
+
+**S2/S3/S4 — reducción de whipsaw (RECHAZADAS como mejora de retorno).** Banda de
+histéresis, rebalanceo mensual (Faber canónico) y voto multi-lookback no superan
+al baseline con parking en media, y en el lockbox (bull puro) lo penalizan
+(el mensual −12.84 pp a 2A). El desglose por régimen es honesto e informativo: el
+**mensual es un filtro de caídas mucho mejor** — en ventanas con QQQ a la baja
+pierde −1.16% frente al −6.13% de QQQ y **le gana el 81% de las veces** (vs 34%
+del Faber diario, que se desangra en whipsaw) — pero retrasa ~1 pp en los bull.
+Queda como **palanca de gestión de riesgo**, no de retorno.
+
+**Insight estructural (honesto).** Una estrategia *long/flat* sobre un único
+índice no puede batir a comprar-y-mantenerlo en un bull sostenido; su valor es
+esquivar drawdown en los bear. El lockbox 2024-2025, al ser bull puro, no tiene
+mercado bajista que premie esa protección. Coherente con la sección 7: el valor
+defendible de este enfoque es **gestión de riesgo** (exposición a crecimiento con
+filtro de caídas y menos drawdown que el índice), no la generación de alpha.
