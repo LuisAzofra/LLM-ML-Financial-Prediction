@@ -2097,6 +2097,8 @@ def paper_autonomous_backtest():
     disable_adx_filter  = bool(body.get('disable_adx_filter', False))
     max_hold_override   = body.get('max_holding_days', 120 if is_trend else None)
     target_vol_override = body.get('target_vol',       0.20 if is_trend else None)
+    disable_take_profit = bool(body.get('disable_take_profit', False))
+    trailing_stop_atr   = float(body.get('trailing_stop_atr', 0.0))
 
     # ── LLM-gate (opcional, replica el flujo del demo_bot_llm.py) ───────────
     # Cuando está activado, antes de abrir cada nueva posición consulta al
@@ -2703,6 +2705,10 @@ def paper_autonomous_backtest():
                 atr  = day['atr']
                 hold = (pd.Timestamp(ds) - pd.Timestamp(position['entry_date'])).days
 
+                if trailing_stop_atr > 0:
+                    position['high_water_mark'] = max(position['high_water_mark'], day['high'])
+                    position['low_water_mark']  = min(position['low_water_mark'],  day['low'])
+
                 # SL fijo: no se mueve durante la vida de la posición.
                 # Breakeven eliminado: generaba muchas micro-ganancias (0.25 ATR)
                 # que hundían el avg_win a ~= avg_loss → PF < 1 aunque WR > 47%.
@@ -2725,7 +2731,7 @@ def paper_autonomous_backtest():
                 if exit_p is None and not disable_atr_stop:
                     if position['type'] == 'LONG':
                         sl_hit = day['low']  <= position['stop_loss']
-                        tp_hit = day['high'] >= position['take_profit']
+                        tp_hit = position['take_profit'] is not None and day['high'] >= position['take_profit']
                         if sl_hit and tp_hit:
                             # Ambos niveles tocados el mismo día: usar close vs midpoint
                             # para estimar cuál se tocó primero (sin datos intradiarios).
@@ -2740,7 +2746,7 @@ def paper_autonomous_backtest():
                             exit_p = position['take_profit']; exit_r = 'TAKE_PROFIT'
                     else:
                         sl_hit = day['high'] >= position['stop_loss']
-                        tp_hit = day['low']  <= position['take_profit']
+                        tp_hit = position['take_profit'] is not None and day['low']  <= position['take_profit']
                         if sl_hit and tp_hit:
                             mid = (position['stop_loss'] + position['take_profit']) / 2
                             if day['close'] <= mid:
@@ -2751,6 +2757,26 @@ def paper_autonomous_backtest():
                             exit_p = position['stop_loss'];   exit_r = 'STOP_LOSS'
                         elif tp_hit:
                             exit_p = position['take_profit']; exit_r = 'TAKE_PROFIT'
+
+                if exit_p is None and trailing_stop_atr > 0:
+                    if position['type'] == 'LONG':
+                        trail = position['high_water_mark'] - trailing_stop_atr * atr
+                        trail = max(trail, position['stop_loss'])
+                        prev  = position.get('trail_stop')
+                        if prev is not None:
+                            trail = max(trail, prev)
+                        position['trail_stop'] = trail
+                        if day['low'] <= trail:
+                            exit_p = trail; exit_r = 'TRAIL'
+                    else:
+                        trail = position['low_water_mark'] + trailing_stop_atr * atr
+                        trail = min(trail, position['stop_loss'])
+                        prev  = position.get('trail_stop')
+                        if prev is not None:
+                            trail = min(trail, prev)
+                        position['trail_stop'] = trail
+                        if day['high'] >= trail:
+                            exit_p = trail; exit_r = 'TRAIL'
 
                 if exit_p is None and hold >= cfg.max_holding_days:
                     exit_p = day['close']; exit_r = 'MAX_HOLD'
@@ -3021,10 +3047,13 @@ def paper_autonomous_backtest():
                     sl_dist   = cfg.atr_stop_mult * bday['atr']
                     sl = entry_adj - sl_dist if direc == 'LONG' else entry_adj + sl_dist
                     tp = entry_adj + 2.0 * sl_dist if direc == 'LONG' else entry_adj - 2.0 * sl_dist  # R:R 2:1 (TP=3 ATR vs SL=1.5 ATR)
+                    if disable_take_profit:
+                        tp = None
                     positions[sym] = {
                         'symbol': sym, 'type': direc, 'entry_date': ds,
                         'entry_price': entry_adj, 'shares': shares,
                         'cost_basis': pos_val, 'stop_loss': sl, 'take_profit': tp,
+                        'high_water_mark': entry_adj, 'low_water_mark': entry_adj,
                         # Tier 3.2: features compactos al entry para retrieval k-NN futuro
                         'entry_features': [
                             float(bday.get('pred', 0.0)),
@@ -3188,6 +3217,8 @@ def paper_autonomous_backtest():
                 'signal_mode': signal_mode,
                 'trend_reverse_exit': trend_reverse_exit,
                 'disable_atr_stop': disable_atr_stop,
+                'disable_take_profit': disable_take_profit,
+                'trailing_stop_atr': trailing_stop_atr,
                 'disable_adx_filter': disable_adx_filter,
                 'max_holding_days': cfg.max_holding_days,
                 'target_vol': cfg.target_vol,
