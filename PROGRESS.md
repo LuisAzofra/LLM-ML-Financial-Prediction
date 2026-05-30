@@ -1707,3 +1707,32 @@ Todas con IC95% negativo (mensual/banda) o nulo (voto) → **ninguna mejora el r
 ```
 
 ---
+
+## Tier 8.4 — L1: LLM como meta-filtro honesto de entradas Faber
+
+**Estado: RECHAZADO ✗ — NULL honesto (el LLM no discrimina la calidad de entrada)**
+
+**Hipótesis:** un LLM local (Qwen2.5-1.5B GGUF) leyendo el estado de mercado podría puntuar la calidad de cada entrada Faber y filtrar/reducir las malas (igual que el meta-labeling: solo reduce o saltea, nunca invierte dirección). Es la vía de "hacer que el LLM influya de verdad" medida con un A/B honesto.
+
+**Probe justo y pre-registrado** (mismos eventos y etiquetas que M1 → directamente comparable: QQQ DEV 2014-2021, n=339, triple-barrier 1σ/20d). Por cada entrada se construye un contexto **causal y NORMALIZADO** — sin fecha ni precio absoluto, para que el LLM no pueda reconocer el momento histórico — con: % sobre la SMA200, volatilidad 20d, retornos 1m/3m/6m, RSI(14) y distancia al máximo de 52 semanas. Prompt **fijo** (no tuneado contra el AUC), `temperature=0`, salida = P(rentable a 20 días). Respuestas cacheadas.
+
+| | AUC | IC | distintos | media score |
+|--|----:|---:|----------:|------------:|
+| **LLM gate (real)** | **0.4597** | −0.089 | 7 | 0.89 |
+| Shuffle (control, 5 semillas) | media 0.507 · máx 0.514 | ≈0 | — | — |
+
+- AUC 0.46 < azar y por debajo del nulo barajado → **VEREDICTO NULL**. Diagnóstico revelador: el LLM puntúa **casi todo alto** (media 0.89), sesgo de optimismo/anchoring; no separa entradas buenas de malas.
+- **Comparativa ML vs LLM:** meta-label ML AUC=0.385 (NULL) vs LLM gate AUC=0.460 (NULL). Ninguno bate al azar.
+- **Decisión:** NO construir el backtest gated por LLM (actuaría sobre puntuaciones sin poder predictivo). Confirma de forma directa y cuantitativa el prior de los Tier 2.3/3.3: el LLM local no aporta señal accionable para dimensionar/filtrar trades.
+
+### Lecciones
+
+- Cierre del ciclo Tier 8: **ni ML (meta-labeling con CV purgado) ni LLM (meta-gate) añaden edge** sobre el primario Faber; ambos nulos y confirmados con shuffle/control. Lo único que mejora de forma robusta y honesta es la **contabilidad correcta del efectivo** (S1, parking). El valor del enfoque es **beta de crecimiento con filtro de caídas** (bate al 60/40 OOS, empata al SPY con menos drawdown), no alpha — coherente con el mercado eficiente y con el Tier 7.
+
+### Comando reproducible
+
+```
+.venv/bin/python tools/probe_llm_gate.py
+```
+
+---
