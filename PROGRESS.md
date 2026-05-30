@@ -1675,3 +1675,35 @@ Todas con IC95% negativo (mensual/banda) o nulo (voto) → **ninguna mejora el r
 ```
 
 ---
+
+## Tier 8.3 — M1: Meta-labeling del primario Faber (López de Prado)
+
+**Estado: RECHAZADO ✗ — NULL honesto (el clasificador secundario no tiene edge fuera de fold)**
+
+**Hipótesis:** el primario Faber (QQQ > SMA200) ya tiene expectativa positiva; un clasificador secundario que prediga P(esta entrada concreta acabará en beneficio) permitiría **filtrar/reducir tamaño** de las entradas malas (whipsaws), sin invertir nunca la dirección → mejor Sharpe / protección. Es el caso de uso de libro del meta-labeling.
+
+**Implementación (correcta y verificada):** módulo `models/ml_models/meta_labeling.py` con el aparato completo de López de Prado — `triple_barrier_labels`, `PurgedKFold` (purga + embargo), `get_avg_uniqueness` (pesos por unicidad de etiquetas solapadas), `frac_diff_ffd`, `train_meta_model`. **9/9 tests unitarios verdes** (`tests/test_meta_labeling.py`). Leak-free: las etiquetas miran adelante solo como target; la sigma de las barreras es trailing; la purga elimina el solapamiento entre etiquetas de train y barras de test.
+
+**Probe GO/NO-GO** (`tools/probe_meta_labeling.py`, SOLO DEV 2014-2021, QQQ; eventos Faber long-eligible submuestreados cada 5 días, n=319; triple-barrier pt=sl=1·σ, vbar=20d; XGBClassifier con pesos de unicidad y CV purgada+embargo):
+
+| | AUC OOF | IC (Spearman) | base_rate |
+|--|-------:|--------------:|----------:|
+| **Real** | **0.3855** | −0.19 | 0.605 |
+| Shuffle (control, 5 semillas) | media 0.528 · máx 0.580 | ≈ 0 | — |
+
+- El AUC real (0.39) es **peor que el azar** y por debajo del nulo barajado (máx 0.58) → **VEREDICTO NULL**. No es ruido ≈0.5: un AUC < 0.5 bajo CV purgado es la huella de que los patrones in-sample **se invierten** fuera de fold (sin estructura aprendible) y de que la purga elimina el leakage que, de otro modo, falsearía un edge. El shuffle-test confirma que no hay señal enmascarada.
+- **Decisión:** NO construir el overlay de sizing (actuaría sobre un clasificador peor que una moneda). NO se buscaron configuraciones de barrera/feature que "ganaran" — sería multiple-testing/overfitting, justo lo que el protocolo prohíbe; el shuffle-test ya descarta señal con la config canónica.
+
+### Lecciones
+
+- Aplicar ML "bien" (meta-labeling de un primario que SÍ funciona, con CV purgado + embargo + triple-barrier + unicidad + shuffle-test) **no crea edge** en este problema. Es un resultado negativo riguroso y publicable, no un fallo de implementación (tests verdes, null reproducible y determinista).
+- Refuerza el hallazgo transversal del proyecto: ningún componente **aprendido/IA** añade alpha sobre el indexado; lo único que mejora de forma robusta y honesta es la **contabilidad correcta del efectivo** (S1, parking). El valor del enfoque Faber-QQQ es **beta de crecimiento con filtro de caídas** (menos drawdown, bate al 60/40 OOS), no alpha.
+
+### Comando reproducible
+
+```
+.venv/bin/python tests/test_meta_labeling.py
+.venv/bin/python tools/probe_meta_labeling.py
+```
+
+---
