@@ -186,6 +186,10 @@ FABER_QQQ = {'mode': 'index_trend', 'index_symbol': 'QQQ',
 VARIANT_CONFIGS['faber_qqq'] = ('FABER_QQQ', FABER_QQQ,
                                 '/tmp/perf_grid_faber_qqq_result.json')
 
+FABER_QQQ_PARK = {**FABER_QQQ, 'parking_mode': 'rate'}
+VARIANT_CONFIGS['faber_qqq_park'] = ('FABER_QQQ_PARK', FABER_QQQ_PARK,
+                                     '/tmp/perf_grid_faber_qqq_park_result.json')
+
 
 def call(start_date: str, end_date: str, body_base: dict) -> dict:
     body = {**body_base, 'start_date': start_date, 'end_date': end_date}

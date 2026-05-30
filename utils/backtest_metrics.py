@@ -16,11 +16,13 @@ return, bh, alpha, maxdd, sharpe, sortino, pf, wr, trades.
 """
 from __future__ import annotations
 
+import math
 import statistics
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from scipy import stats as _stats
 
 GateResult = Dict[str, Any]
 
@@ -393,4 +395,198 @@ def render_gate(gate: GateResult, name: str = 'NEW vs BASELINE') -> str:
     lines.append(f"  Δ_MaxDD        : {fmt_d(gate['delta_maxdd'])}   {'✓' if gate['maxdd_ok'] else '✗'}")
     verdict = 'ACEPTADO ✓' if gate['accepted'] else 'RECHAZADO ✗'
     lines.append(f"  Veredicto      : {verdict}")
+    return '\n'.join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rigor estadístico: skill predictivo (IC, DA) y haircut por multiple-testing
+# (Probabilistic / Deflated Sharpe Ratio, Bailey & López de Prado 2014).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def information_coefficient(pred: Sequence[float], realized: Sequence[float]) -> float:
+    """Spearman rank correlation entre predicción y retorno realizado. 0.0 si degenerado."""
+    p = np.asarray(pred, dtype=float)
+    r = np.asarray(realized, dtype=float)
+    if p.size < 3 or r.size != p.size:
+        return 0.0
+    mask = np.isfinite(p) & np.isfinite(r)
+    if mask.sum() < 3:
+        return 0.0
+    p = p[mask]
+    r = r[mask]
+    if np.ptp(p) == 0.0 or np.ptp(r) == 0.0:
+        return 0.0
+    rho = _stats.spearmanr(p, r).correlation
+    if rho is None or not np.isfinite(rho):
+        return 0.0
+    return float(rho)
+
+
+def directional_accuracy(pred: Sequence[float], realized: Sequence[float]) -> float:
+    """Fracción de aciertos de signo sobre entries con realized != 0. 0.5 si no hay entries válidas."""
+    p = np.asarray(pred, dtype=float)
+    r = np.asarray(realized, dtype=float)
+    if p.size == 0 or r.size != p.size:
+        return 0.5
+    mask = np.isfinite(p) & np.isfinite(r) & (r != 0.0)
+    if not mask.any():
+        return 0.5
+    hits = np.sign(p[mask]) == np.sign(r[mask])
+    return float(np.mean(hits))
+
+
+def probabilistic_sharpe_ratio(
+    observed_sharpe: float,
+    benchmark_sharpe: float,
+    n_obs: int,
+    skew: float = 0.0,
+    kurtosis: float = 3.0,
+) -> float:
+    """
+    Probabilistic Sharpe Ratio (Bailey & López de Prado).
+
+    observed_sharpe y benchmark_sharpe son Sharpe POR PERIODO (no anualizado),
+    en las mismas unidades que las n_obs observaciones de retorno. n_obs es el
+    número de observaciones de retorno. Devuelve 0.0 si n_obs<2 o si el radicando
+    del denominador es <=0.
+    """
+    if n_obs < 2:
+        return 0.0
+    denom_arg = 1.0 - skew * observed_sharpe + ((kurtosis - 1.0) / 4.0) * observed_sharpe ** 2
+    if denom_arg <= 0.0:
+        return 0.0
+    z = (observed_sharpe - benchmark_sharpe) * math.sqrt(n_obs - 1) / math.sqrt(denom_arg)
+    return float(_stats.norm.cdf(z))
+
+
+def expected_max_sharpe(n_trials: int, sharpe_variance: float) -> float:
+    """
+    Sharpe máximo esperado bajo la hipótesis nula tras N pruebas independientes
+    (aproximación por el máximo de N gaussianas). Devuelve 0.0 si sharpe_variance<=0.
+    """
+    if sharpe_variance <= 0.0:
+        return 0.0
+    gamma_e = 0.5772156649015329
+    n = max(int(n_trials), 2)
+    quantile = (1.0 - gamma_e) * _stats.norm.ppf(1.0 - 1.0 / n) + gamma_e * _stats.norm.ppf(1.0 - 1.0 / (n * math.e))
+    return float(math.sqrt(sharpe_variance) * quantile)
+
+
+def deflated_sharpe_ratio(
+    observed_sharpe: float,
+    n_trials: int,
+    sharpe_variance: float,
+    skew: float,
+    kurtosis: float,
+    n_obs: int,
+) -> float:
+    """
+    Deflated Sharpe Ratio: PSR contra el Sharpe máximo esperado por azar tras
+    n_trials configuraciones probadas. DSR>0.95 ⇒ el Sharpe sobrevive al haircut
+    por multiple-testing (no es un falso positivo de data-mining).
+    """
+    sr_star = expected_max_sharpe(n_trials, sharpe_variance)
+    return probabilistic_sharpe_ratio(observed_sharpe, sr_star, n_obs, skew, kurtosis)
+
+
+def sharpe_stats_from_rows(
+    rows: List[Tuple[int, str, str, Dict[str, float]]],
+) -> Tuple[float, float, float, float, int]:
+    """
+    (mean_sharpe, var_sharpe, skew_of_returns, kurt_of_returns, n) a partir de las
+    ventanas. skew/kurt (kurtosis fisher=False, normal=3) sobre los retornos por
+    ventana. Nan-safe: var=0, skew=0, kurt=3 si n<3.
+    """
+    if not rows:
+        return 0.0, 0.0, 0.0, 3.0, 0
+    ms = [m for _, _, _, m in rows]
+    sharpes = np.asarray([m.get('sharpe', 0.0) for m in ms], dtype=float)
+    returns = np.asarray([m.get('return', 0.0) for m in ms], dtype=float)
+    n = len(ms)
+    mean_sharpe = float(np.mean(sharpes)) if n else 0.0
+    if n < 3:
+        return mean_sharpe, 0.0, 0.0, 3.0, n
+    var_sharpe = float(np.var(sharpes, ddof=1))
+    if np.ptp(returns) == 0.0:
+        return mean_sharpe, var_sharpe, 0.0, 3.0, n
+    sk = float(_stats.skew(returns, bias=False))
+    ku = float(_stats.kurtosis(returns, fisher=False, bias=False))
+    if not np.isfinite(sk):
+        sk = 0.0
+    if not np.isfinite(ku):
+        ku = 3.0
+    return mean_sharpe, var_sharpe, sk, ku, n
+
+
+def build_horizon_summary(
+    runs: List[Dict[str, Any]],
+    beat_keys: Tuple[str, ...] = ('alpha_vs_spy_pct', 'alpha_vs_qqq_pct', 'alpha_vs_6040_pct'),
+) -> Dict[str, Any]:
+    """
+    Resumen agregado de un horizonte. Construye `rows` desde los dicts por ventana,
+    llama a aggregate_with_ci y añade mean_return/median_return/pct_positive/
+    avg_maxdd/worst_dd y un beat_<suffix>_pct por cada clave en beat_keys
+    (% de ventanas con alpha vs benchmark > 0). {'n':0} si no hay runs.
+    """
+    if not runs:
+        return {'n': 0}
+    rows: List[Tuple[int, str, str, Dict[str, float]]] = []
+    for i, r in enumerate(runs):
+        rows.append((
+            i,
+            r.get('start_date', ''),
+            r.get('end_date', ''),
+            {
+                'return': r.get('return_pct'),
+                'bh':     r.get('bh_return_pct'),
+                'alpha':  r.get('alpha_pct'),
+                'maxdd':  r.get('maxdd_pct'),
+                'sharpe': r.get('sharpe'),
+                'sortino': r.get('sortino'),
+                'pf':     r.get('profit_factor'),
+                'wr':     r.get('win_rate_pct'),
+                'trades': r.get('total_trades'),
+            },
+        ))
+    agg = aggregate_with_ci(rows)
+    if agg is None:
+        return {'n': 0}
+    summary: Dict[str, Any] = dict(agg)
+    summary['mean_return'] = agg['avg_return']
+    summary['median_return'] = agg['median_return']
+    summary['pct_positive'] = agg['pct_pos']
+    summary['avg_maxdd'] = agg['avg_maxdd']
+    summary['worst_dd'] = agg['worst_dd']
+    for key in beat_keys:
+        suffix = key.replace('alpha_vs_', '').replace('_pct', '')
+        vals = [r.get(key) for r in runs if r.get(key) is not None]
+        summary[f'beat_{suffix}_pct'] = 100.0 * np.mean([v > 0 for v in vals]) if vals else 0.0
+    return summary
+
+
+def format_horizon_table(summaries: Dict[str, Dict[str, Any]]) -> str:
+    """Render monoespaciado por horizonte (mismo estilo que format_aggregate_table)."""
+    cols = [
+        ('horizon',     '{:<10}', lambda h, s: h),
+        ('n',           '{:>4}',  lambda h, s: f"{s.get('n', 0)}"),
+        ('mean_ret±CI', '{:>24}', lambda h, s: f"{s['mean_return']:+6.2f}% [{s['return_ci'][0]:+5.1f},{s['return_ci'][1]:+5.1f}]"),
+        ('median_ret',  '{:>11}', lambda h, s: f"{s['median_return']:+6.2f}%"),
+        ('%pos',        '{:>6}',  lambda h, s: f"{s['pct_positive']:.0f}%"),
+        ('avg_DD',      '{:>9}',  lambda h, s: f"{s['avg_maxdd']:+6.2f}%"),
+        ('worst_DD',    '{:>10}', lambda h, s: f"{s['worst_dd']:+6.2f}%"),
+        ('Sharpe±CI',   '{:>20}', lambda h, s: f"{s['avg_sharpe']:+5.2f} [{s['sharpe_ci'][0]:+4.2f},{s['sharpe_ci'][1]:+4.2f}]"),
+        ('beat_SPY%',   '{:>10}', lambda h, s: f"{s.get('beat_spy_pct', 0.0):.0f}%"),
+        ('beat_QQQ%',   '{:>10}', lambda h, s: f"{s.get('beat_qqq_pct', 0.0):.0f}%"),
+        ('beat_6040%',  '{:>11}', lambda h, s: f"{s.get('beat_6040_pct', 0.0):.0f}%"),
+    ]
+    lines = []
+    header = ''.join(fmt.format(name) for name, fmt, _ in cols)
+    lines.append(header)
+    lines.append('─' * len(header))
+    for horizon, s in summaries.items():
+        if not s or s.get('n', 0) == 0:
+            continue
+        row = ''.join(fmt.format(getter(horizon, s)) for _, fmt, getter in cols)
+        lines.append(row)
     return '\n'.join(lines)

@@ -1558,3 +1558,64 @@ PORT=5057 TFG_DISABLE_TF=1 TFG_LIGHTWEIGHT=1 .venv/bin/python -u api.py &
 ```
 
 ---
+
+## Tier 8 — Mejoras estructurales honestas sobre Faber-QQQ (rama strategy-improvements)
+
+**Contexto:** Tier 7 cerró con que el bot complejo no generaliza y que la mejor config honesta es Faber-QQQ (`mode=index_trend, index_symbol=QQQ`: mantener QQQ sobre su SMA200, si no efectivo). Tier 8 retoma el objetivo de MEJORAR de forma robusta y out-of-sample a ese baseline, empezando por las vías de menor riesgo de overfitting. Toda mejora se valida primero en DESARROLLO (fechas aleatorias 2014-2023) y se confirma UNA vez en LOCKBOX (2024-2025), con test de causalidad tras cada cambio.
+
+### Fase 0 — Infraestructura de rigor adicional (todo default-off / aditivo)
+
+- **Caché de precios causal** (`utils/price_cache.py`, hook en `data_loader.download_stock_data`): cachea la historia completa por símbolo (pickle) y la corta por fecha al leer. Verificado *behavior-preserving* (slice cacheado == descarga fresca, frame idéntico). Evita 429 de Yahoo en backtests masivos. Env `PRICE_CACHE=0` lo desactiva.
+- **Benchmark QQQ** añadido a `_benchmark_metrics` y a los returns de `index_trend`/`dual_momentum` (`qqq_return_pct`, `alpha_vs_qqq_pct`). Para Faber-QQQ, `alpha_vs_qqq` responde directamente a "¿el timing bate a comprar y mantener QQQ?".
+- **Harness de fechas aleatorias** (`tools/run_random_grid.py`): N (def. 30) fechas aleatorias con semilla por horizonte {2W,1M,3M,6M,1Y,2Y}; universos DISJUNTOS en el tiempo — `dev` (ventanas que terminan ≤ 2023-12-31) y `lockbox` (starts en 2024-2025, datos hasta hoy). Reporta media Y mediana, %pos, DD medio y peor, alpha vs SPY/QQQ/60-40 (bate-benchmark %) y Deflated Sharpe por horizonte. Reusa `aggregate_with_ci`. Misma semilla → mismas ventanas → A/B pareado vía `delta_ci`.
+- **Métricas** (`utils/backtest_metrics.py`): `information_coefficient`, `directional_accuracy`, `probabilistic_sharpe_ratio`, `expected_max_sharpe`, `deflated_sharpe_ratio` (Bailey & López de Prado), `build_horizon_summary`, `format_horizon_table`. Contador honesto de configuraciones probadas en `utils/trial_registry.py` (alimenta el N de la DSR).
+- **Test de causalidad** (`tests/test_causality.py`, in-process vía `app.test_client`): (1) truncación — la decisión en cada día t es idéntica si la ventana se extiende al futuro (probado para parking on/off, equity exactamente igual, `maxrel=0.0`); (2) propiedad de la señal SMA invariante a mutar precios > t; (3) control negativo que demuestra que una señal con look-ahead SÍ se detecta. Todo verde. (El shuffle-test del ML queda para la fase de meta-labeling.)
+
+### Tier 8.1 — S1: Parking en letras del Tesoro cuando se está fuera
+
+**Estado: ACEPTADO ✓** (mejora estricta sobre Faber-QQQ; NO genera alpha vs el índice)
+
+**Hipótesis:** Faber-QQQ pasa ~20-30% del tiempo fuera de mercado, y ahí el baseline tenía el efectivo a **0%**. Acreditar el tipo libre de riesgo sobre el efectivo ocioso no es una apuesta de estrategia, es contabilidad correcta — y en 2022-2025 (tipos 4-5%) es dinero real que se estaba ignorando.
+
+**Mecanismo (causal):** cuando está fuera, se acumula el interés diario derivado de `^IRX` (rendimiento de la letra a 13 semanas), usando el valor del día **anterior** (`shift(1)`), alineado por fecha de calendario (se detectó y corrigió que `^IRX` se sella a las 12:20 y QQQ a las 13:30 → `reindex` directo daba 100% NaN; se normaliza a fecha). `parking_mode='none'` (default) reproduce el baseline EXACTO. Hook: bloque `is_index_trend` de `api.py`.
+
+**DEV 2014-2023 (30 fechas/horizonte, semilla 42, pareado):**
+
+| Plazo | base media | park media | Δret [CI95] | ΔmaxDD |
+|-------|-----------:|-----------:|------------:|-------:|
+| 6M | +8.02% | +8.18% | **+0.15 [+0.06,+0.26]** | +0.03 |
+| 1Y | +12.25% | +12.60% | **+0.34 [+0.15,+0.58]** | +0.10 |
+| 2Y | +21.74% | +22.33% | **+0.59 [+0.37,+0.82]** | +0.25 |
+
+**LOCKBOX 2024-2025 (out-of-sample, 30 fechas/horizonte, semilla 42, pareado):**
+
+| Plazo | base media | park media | Δret [CI95] |
+|-------|-----------:|-----------:|------------:|
+| 6M | +5.67% | +6.04% | **+0.36 [+0.23,+0.48]** |
+| 1Y | +15.21% | +15.88% | **+0.68 [+0.57,+0.79]** |
+| 2Y | +37.70% | +38.82% | **+1.12 [+1.07,+1.17]** |
+
+- Δret positivo y con IC95% que excluye el 0 en TODOS los horizontes, en dev y en lockbox. **180/180 ventanas: parking ≥ baseline** (por construcción el interés ≥ 0, nunca resta). ΔmaxDD ≥ 0 (el efectivo nunca pierde; drawdown marginalmente mejor).
+- El efecto crece con el horizonte y es **mayor en lockbox** (+1.12pp a 2Y vs +0.59pp en dev) porque 2024-2025 tuvo tipos al 4-5% mientras 2014-2021 estuvo cerca de 0. Confirma la lógica del mecanismo.
+
+**La pregunta honesta — ¿bate ahora a QQQ?** No. Incluso con parking, en lockbox Faber-QQQ queda por debajo de comprar y mantener QQQ en todos los plazos (alpha_vs_qqq −0.57% a 2W … −7.29% a 2Y; bate a QQQ solo 0-17% de las ventanas): 2024-2025 fue un bull sostenido y el timing 200d cede upside. **S1 mejora el retorno absoluto de la propia estrategia (Pareto: nunca peor que el baseline 0%-cash), no produce alpha sobre el índice.**
+
+### Lecciones / decisión
+
+- Primera mejora honesta, robusta y validada OOS sobre el baseline Faber-QQQ del Tier 7: **batir a Faber-QQQ** (uno de los dos objetivos) se consigue por contabilidad correcta del efectivo, sin overfitting (no hay parámetro ajustado; la DSR no aplica porque no se buscó sobre ventanas). Batir al ÍNDICE de forma fiable sigue abierto (S2-S4, M1).
+- Lección de implementación: las series de Yahoo se sellan a horas intradía distintas según el activo (índices vs ETFs); alinear por timestamp crudo rompe en silencio. Normalizar a fecha.
+
+### Comandos reproducibles
+
+```
+PORT=5057 TFG_DISABLE_TF=1 TFG_LIGHTWEIGHT=1 .venv/bin/python -u api.py &
+.venv/bin/python tests/test_causality.py
+# dev (2014-2023) — pareado, misma semilla
+.venv/bin/python -u tools/run_random_grid.py --variant faber_qqq      --universe dev     --n-windows 30 --seed 42
+.venv/bin/python -u tools/run_random_grid.py --variant faber_qqq_park  --universe dev     --n-windows 30 --seed 42
+# lockbox out-of-sample (2024-2025)
+.venv/bin/python -u tools/run_random_grid.py --variant faber_qqq       --universe lockbox --n-windows 30 --seed 42
+.venv/bin/python -u tools/run_random_grid.py --variant faber_qqq_park   --universe lockbox --n-windows 30 --seed 42
+```
+
+---

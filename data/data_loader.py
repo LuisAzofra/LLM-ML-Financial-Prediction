@@ -35,109 +35,114 @@ class FinancialDataLoader:
             end_date: Fecha fin 'YYYY-MM-DD'
             interval: Intervalo ('1d', '1h', '1wk', etc.)
         """
-        try:
-            logger.info(f"Descargando datos de {symbol}...")
+        from utils.price_cache import get_or_fetch
 
-            import urllib.request
-            import urllib.error
-            import json
-            import time
+        def _fetch(s: str, e: str) -> pd.DataFrame:
+            try:
+                logger.info(f"Descargando datos de {symbol}...")
 
-            # Map intervals for Yahoo API v8
-            interval_map = {
-                '1d': '1d', '1wk': '1wk', '1mo': '1mo',
-                '1h': '1h', '1m': '1m'
-            }
-            api_interval = interval_map.get(interval, '1d')
+                import urllib.request
+                import urllib.error
+                import json
+                import time
 
-            # Use period1/period2 Unix timestamps — this is the ONLY way to guarantee
-            # that Yahoo returns data strictly ending at end_date (no leakage for backtesting)
-            start_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
-            end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
-            p1 = int(start_dt.timestamp())
-            p2 = int((end_dt + timedelta(days=1)).timestamp())
+                # Map intervals for Yahoo API v8
+                interval_map = {
+                    '1d': '1d', '1wk': '1wk', '1mo': '1mo',
+                    '1h': '1h', '1m': '1m'
+                }
+                api_interval = interval_map.get(interval, '1d')
 
-            # URL to Yahoo API v8 with explicit date range
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={p1}&period2={p2}&interval={api_interval}"
+                # Use period1/period2 Unix timestamps — this is the ONLY way to guarantee
+                # that Yahoo returns data strictly ending at end_date (no leakage for backtesting)
+                start_dt = datetime.strptime(s, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                end_dt = datetime.strptime(e, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                p1 = int(start_dt.timestamp())
+                p2 = int((end_dt + timedelta(days=1)).timestamp())
 
-            req = urllib.request.Request(url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Accept': 'application/json'
-            })
+                # URL to Yahoo API v8 with explicit date range
+                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={p1}&period2={p2}&interval={api_interval}"
 
-            logger.info(f"Usando Yahoo API v8 para {symbol} ({start_date} → {end_date})...")
+                req = urllib.request.Request(url, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'Accept': 'application/json'
+                })
 
-            # Retry con backoff exponencial para errores 429 (rate limiting)
-            data = None
-            for attempt in range(4):
-                try:
-                    with urllib.request.urlopen(req, timeout=15) as response:
-                        if response.status == 200:
-                            data = json.loads(response.read().decode('utf-8'))
-                            break
-                except urllib.error.HTTPError as http_err:
-                    if http_err.code == 429:
-                        wait_sec = (2 ** attempt) * 2  # 2, 4, 8, 16 s
-                        logger.warning(f"Rate limited (429) para {symbol}, esperando {wait_sec}s (intento {attempt+1}/4)")
-                        time.sleep(wait_sec)
-                    else:
-                        raise  # otros errores HTTP no se reintentan
-                except Exception:
-                    raise
+                logger.info(f"Usando Yahoo API v8 para {symbol} ({s} → {e})...")
 
-            if data is None:
-                logger.warning(f"No se encontraron datos para {symbol} tras reintentos")
+                # Retry con backoff exponencial para errores 429 (rate limiting)
+                data = None
+                for attempt in range(4):
+                    try:
+                        with urllib.request.urlopen(req, timeout=15) as response:
+                            if response.status == 200:
+                                data = json.loads(response.read().decode('utf-8'))
+                                break
+                    except urllib.error.HTTPError as http_err:
+                        if http_err.code == 429:
+                            wait_sec = (2 ** attempt) * 2  # 2, 4, 8, 16 s
+                            logger.warning(f"Rate limited (429) para {symbol}, esperando {wait_sec}s (intento {attempt+1}/4)")
+                            time.sleep(wait_sec)
+                        else:
+                            raise  # otros errores HTTP no se reintentan
+                    except Exception:
+                        raise
+
+                if data is None:
+                    logger.warning(f"No se encontraron datos para {symbol} tras reintentos")
+                    return pd.DataFrame()
+
+                chart = data.get('chart', {})
+                api_error = chart.get('error')
+                if api_error:
+                    logger.warning(f"Yahoo reportó error para {symbol}: {api_error}")
+                    return pd.DataFrame()
+
+                results = chart.get('result')
+                if not results or results[0] is None:
+                    logger.warning(f"Sin datos para {symbol} (símbolo o rango {s}→{e} sin resultados)")
+                    return pd.DataFrame()
+
+                result = results[0]
+                timestamps = result.get('timestamp')
+                if not timestamps:
+                    logger.warning(f"Sin barras (timestamp) para {symbol} en {s}→{e}")
+                    return pd.DataFrame()
+
+                quote = result['indicators']['quote'][0]
+
+                # Convert arrays to pandas DataFrame
+                df = pd.DataFrame({
+                    'Date': pd.to_datetime(timestamps, unit='s'),
+                    'Open': quote.get('open', []),
+                    'High': quote.get('high', []),
+                    'Low': quote.get('low', []),
+                    'Close': quote.get('close', []),
+                    'Volume': quote.get('volume', [])
+                })
+
+                # Índice tz-naive para evitar "Invalid comparison between
+                # datetime64[s, UTC] and Timestamp" en todo el pipeline
+                df.set_index('Date', inplace=True)
+
+                # Add Adj Close (same as Close for basic charts)
+                df['Adj_Close'] = df['Close']
+                df['Symbol'] = symbol
+
+                # Clean up
+                df.dropna(subset=['Close'], inplace=True)
+                df.ffill(inplace=True)
+                ohlc_cols = [c for c in ['Open', 'High', 'Low', 'Close'] if c in df.columns]
+                df.dropna(subset=ohlc_cols, inplace=True)
+
+                logger.info(f"Descargados {len(df)} registros de {symbol} (Yahoo JSON API)")
+                return df
+
+            except Exception as exc:
+                logger.error(f"Error descargando {symbol}: {str(exc)}")
                 return pd.DataFrame()
 
-            chart = data.get('chart', {})
-            api_error = chart.get('error')
-            if api_error:
-                logger.warning(f"Yahoo reportó error para {symbol}: {api_error}")
-                return pd.DataFrame()
-
-            results = chart.get('result')
-            if not results or results[0] is None:
-                logger.warning(f"Sin datos para {symbol} (símbolo o rango {start_date}→{end_date} sin resultados)")
-                return pd.DataFrame()
-
-            result = results[0]
-            timestamps = result.get('timestamp')
-            if not timestamps:
-                logger.warning(f"Sin barras (timestamp) para {symbol} en {start_date}→{end_date}")
-                return pd.DataFrame()
-
-            quote = result['indicators']['quote'][0]
-
-            # Convert arrays to pandas DataFrame
-            df = pd.DataFrame({
-                'Date': pd.to_datetime(timestamps, unit='s'),
-                'Open': quote.get('open', []),
-                'High': quote.get('high', []),
-                'Low': quote.get('low', []),
-                'Close': quote.get('close', []),
-                'Volume': quote.get('volume', [])
-            })
-
-            # Índice tz-naive para evitar "Invalid comparison between
-            # datetime64[s, UTC] and Timestamp" en todo el pipeline
-            df.set_index('Date', inplace=True)
-
-            # Add Adj Close (same as Close for basic charts)
-            df['Adj_Close'] = df['Close']
-            df['Symbol'] = symbol
-
-            # Clean up
-            df.dropna(subset=['Close'], inplace=True)
-            df.ffill(inplace=True)
-            ohlc_cols = [c for c in ['Open', 'High', 'Low', 'Close'] if c in df.columns]
-            df.dropna(subset=ohlc_cols, inplace=True)
-
-            logger.info(f"Descargados {len(df)} registros de {symbol} (Yahoo JSON API)")
-            return df
-
-        except Exception as e:
-            logger.error(f"Error descargando {symbol}: {str(e)}")
-            return pd.DataFrame()
+        return get_or_fetch(symbol, start_date, end_date, interval, _fetch)
     
     def download_multiple_stocks(self, symbols: List[str], start_date: str, 
                                  end_date: str, interval: str = '1d') -> Dict[str, pd.DataFrame]:

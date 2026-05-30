@@ -2064,6 +2064,7 @@ def _series_metrics(daily_rets: np.ndarray) -> tuple:
 def _benchmark_metrics(loader, start_date: str, end_date: str) -> dict:
     out = {
         'spy_return_pct': None, 'spy_sharpe': None, 'spy_maxdd_pct': None,
+        'qqq_return_pct': None, 'qqq_sharpe': None, 'qqq_maxdd_pct': None,
         'sixtyforty_return_pct': None, 'sixtyforty_sharpe': None, 'sixtyforty_maxdd_pct': None,
     }
 
@@ -2086,6 +2087,17 @@ def _benchmark_metrics(loader, start_date: str, end_date: str) -> dict:
             out['spy_maxdd_pct'] = round(spy_dd, 2)
     except Exception as spy_err:
         logger.warning(f"SPY benchmark omitido: {spy_err}")
+
+    try:
+        qqq = _close_series('QQQ')
+        if qqq is not None and len(qqq) >= 2:
+            qqq_rets = qqq.pct_change().dropna().to_numpy()
+            out['qqq_return_pct'] = round(float(qqq.iloc[-1] / qqq.iloc[0] - 1.0) * 100, 2)
+            qqq_sh, qqq_dd = _series_metrics(qqq_rets)
+            out['qqq_sharpe'] = round(qqq_sh, 3)
+            out['qqq_maxdd_pct'] = round(qqq_dd, 2)
+    except Exception as qqq_err:
+        logger.warning(f"QQQ benchmark omitido: {qqq_err}")
 
     try:
         spy = _close_series('SPY')
@@ -2334,11 +2346,34 @@ def paper_autonomous_backtest():
             if len(test_dates) < 5:
                 return jsonify({'status': 'error', 'error': 'Período de test demasiado corto'}), 400
 
+            parking_mode = str(body.get('parking_mode', 'none')).lower()
+            parking_symbol = str(body.get('parking_symbol', 'BIL')).upper()
+            parking_on = parking_mode in ('rate', 'etf')
+            daily_rf = np.zeros(len(test_dates), dtype=float)
+            if parking_on:
+                try:
+                    rf_df = loader.download_data('^IRX', train_start, dl_end, asset_type='stock')
+                    if rf_df is not None and not rf_df.empty and 'Close' in rf_df.columns:
+                        rf_close = rf_df['Close'].astype(float)
+                        if hasattr(rf_close.index, 'tz') and rf_close.index.tz is not None:
+                            rf_close.index = rf_close.index.tz_localize(None)
+                        rf_close.index = pd.DatetimeIndex(rf_close.index).normalize()
+                        rf_close = rf_close[~rf_close.index.duplicated()]
+                        idf_dates = pd.DatetimeIndex(idf.index).normalize()
+                        rf_aligned = rf_close.reindex(idf_dates).ffill().shift(1)
+                        rf_prev = rf_aligned.to_numpy(dtype=float)[test_mask]
+                        daily_rf = (1.0 + np.nan_to_num(rf_prev, nan=0.0) / 100.0) ** (1.0 / 252.0) - 1.0
+                except Exception as rf_err:
+                    logger.warning(f"Parking rf (^IRX) omitido: {rf_err}")
+                    daily_rf = np.zeros(len(test_dates), dtype=float)
+
             capital     = init_cap
             shares      = 0.0
             in_market   = False
             entry_price = 0.0
             entry_date  = None
+            parking_interest = 0.0
+            parking_days = 0
             equity_vals = [capital]
             equity_dts  = [test_dates[0]]
             all_trades  = []
@@ -2347,6 +2382,11 @@ def paper_autonomous_backtest():
                 ds  = test_dates[j]
                 px  = test_close[j]
                 sma = test_sma200[j]
+                if parking_on and not in_market and j > 0:
+                    interest = capital * daily_rf[j]
+                    capital += interest
+                    parking_interest += interest
+                    parking_days += 1
                 bullish = (not np.isnan(sma)) and px > sma
 
                 if not in_market and bullish:
@@ -2440,8 +2480,10 @@ def paper_autonomous_backtest():
 
             bench = _benchmark_metrics(loader, test_dates[0], test_dates[-1])
             spy_ret_b = bench['spy_return_pct']
+            qqq_ret_b = bench['qqq_return_pct']
             sf_ret_b  = bench['sixtyforty_return_pct']
             alpha_vs_spy  = round(total_ret - spy_ret_b, 2) if spy_ret_b is not None else None
+            alpha_vs_qqq  = round(total_ret - qqq_ret_b, 2) if qqq_ret_b is not None else None
             alpha_vs_6040 = round(total_ret - sf_ret_b, 2)  if sf_ret_b  is not None else None
 
             return jsonify({
@@ -2486,10 +2528,14 @@ def paper_autonomous_backtest():
                     'spy_return_pct':         bench['spy_return_pct'],
                     'spy_sharpe':             bench['spy_sharpe'],
                     'spy_maxdd_pct':          bench['spy_maxdd_pct'],
+                    'qqq_return_pct':         bench['qqq_return_pct'],
+                    'qqq_sharpe':             bench['qqq_sharpe'],
+                    'qqq_maxdd_pct':          bench['qqq_maxdd_pct'],
                     'sixtyforty_return_pct':  bench['sixtyforty_return_pct'],
                     'sixtyforty_sharpe':      bench['sixtyforty_sharpe'],
                     'sixtyforty_maxdd_pct':   bench['sixtyforty_maxdd_pct'],
                     'alpha_vs_spy_pct':       alpha_vs_spy,
+                    'alpha_vs_qqq_pct':       alpha_vs_qqq,
                     'alpha_vs_6040_pct':      alpha_vs_6040,
                 },
                 'equity_curve': {
@@ -2506,6 +2552,13 @@ def paper_autonomous_backtest():
                     'win_rate': round(win_rate, 1),
                 }] if all_trades else [],
                 'active_timeline': [],
+                'parking_stats': {
+                    'mode':         parking_mode,
+                    'symbol':       parking_symbol if parking_on else None,
+                    'days_parked':  parking_days,
+                    'interest_usd': round(parking_interest, 2),
+                    'return_pct':   round(parking_interest / init_cap * 100, 2),
+                },
                 'signal_stats': {
                     'total_signals':    len(test_dates),
                     'filtered_signals': len(all_trades),
@@ -2689,8 +2742,10 @@ def paper_autonomous_backtest():
 
             bench = _benchmark_metrics(loader, test_dates[0], test_dates[-1])
             spy_ret_b = bench['spy_return_pct']
+            qqq_ret_b = bench['qqq_return_pct']
             sf_ret_b  = bench['sixtyforty_return_pct']
             alpha_vs_spy  = round(total_ret - spy_ret_b, 2) if spy_ret_b is not None else None
+            alpha_vs_qqq  = round(total_ret - qqq_ret_b, 2) if qqq_ret_b is not None else None
             alpha_vs_6040 = round(total_ret - sf_ret_b, 2)  if sf_ret_b  is not None else None
 
             rotated_to = sorted({t['symbol'] for t in all_trades} | ({held_symbol} if held_symbol else set()))
@@ -2740,10 +2795,14 @@ def paper_autonomous_backtest():
                     'spy_return_pct':         bench['spy_return_pct'],
                     'spy_sharpe':             bench['spy_sharpe'],
                     'spy_maxdd_pct':          bench['spy_maxdd_pct'],
+                    'qqq_return_pct':         bench['qqq_return_pct'],
+                    'qqq_sharpe':             bench['qqq_sharpe'],
+                    'qqq_maxdd_pct':          bench['qqq_maxdd_pct'],
                     'sixtyforty_return_pct':  bench['sixtyforty_return_pct'],
                     'sixtyforty_sharpe':      bench['sixtyforty_sharpe'],
                     'sixtyforty_maxdd_pct':   bench['sixtyforty_maxdd_pct'],
                     'alpha_vs_spy_pct':       alpha_vs_spy,
+                    'alpha_vs_qqq_pct':       alpha_vs_qqq,
                     'alpha_vs_6040_pct':      alpha_vs_6040,
                 },
                 'equity_curve': {
