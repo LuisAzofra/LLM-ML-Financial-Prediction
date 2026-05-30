@@ -2148,7 +2148,12 @@ def paper_autonomous_backtest():
     # Para mode='ml' los defaults se mantienen más conservadores.
     is_trend = (mode == 'trend')
     is_index_trend = (mode == 'index_trend')
+    is_dual_momentum = (mode == 'dual_momentum')
     index_symbol = str(body.get('index_symbol', 'SPY')).upper()
+    dm_assets = [str(s).upper() for s in body.get('dm_assets', ['QQQ', 'SPY', 'EFA'])]
+    dm_defensive = str(body.get('dm_defensive', 'TLT')).upper()
+    dm_lookback = int(body.get('dm_lookback', 252))
+    dm_use_sma200 = bool(body.get('dm_use_sma200', True))
     signal_mode = str(body.get('signal_mode', 'sma')).lower()
     trend_reverse_exit  = bool(body.get('trend_reverse_exit', is_trend))
     disable_atr_stop    = bool(body.get('disable_atr_stop',   is_trend))
@@ -2514,6 +2519,263 @@ def paper_autonomous_backtest():
             return jsonify({'status': 'error', 'error': str(ve)}), 400
         except Exception as e:
             logger.error(f"Index-trend backtest error: {traceback.format_exc()}")
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    if is_dual_momentum:
+        try:
+            loader = FinancialDataLoader()
+            train_start = (start_dt - pd.DateOffset(months=18)).strftime('%Y-%m-%d')
+            dl_end      = (end_dt + pd.DateOffset(days=1)).strftime('%Y-%m-%d')
+            dm_symbols  = list(dict.fromkeys(dm_assets + [dm_defensive]))
+
+            close_map = {}
+            for sym in dm_symbols:
+                sdf = loader.download_data(sym, train_start, dl_end, asset_type='stock')
+                if sdf is None or sdf.empty or 'Close' not in sdf.columns:
+                    return jsonify({'status': 'error', 'error': f'No se pudieron cargar datos de {sym}'}), 400
+                if hasattr(sdf.index, 'tz') and sdf.index.tz is not None:
+                    sdf.index = sdf.index.tz_localize(None)
+                sdf = sdf[sdf.index <= end_dt]
+                s = sdf['Close'].astype(float)
+                close_map[sym] = s[s > 0]
+
+            price_df = pd.concat(close_map, axis=1, join='outer').sort_index().ffill()
+            offensive_avail = [s for s in dm_assets if s in price_df.columns]
+            if not offensive_avail:
+                return jsonify({'status': 'error', 'error': 'Sin activos ofensivos disponibles'}), 400
+
+            sma200_df = price_df.rolling(200, min_periods=100).mean()
+            mom_df    = price_df / price_df.shift(dm_lookback) - 1.0
+
+            test_mask  = price_df.index >= start_dt
+            test_dates = [str(d.date()) for d in price_df.index[test_mask]]
+            if len(test_dates) < 5:
+                return jsonify({'status': 'error', 'error': 'Período de test demasiado corto'}), 400
+
+            test_idx     = price_df.index[test_mask]
+            test_prices  = price_df.loc[test_idx]
+            test_mom     = mom_df.loc[test_idx]
+            test_sma200  = sma200_df.loc[test_idx]
+            defensive_ok = dm_defensive in price_df.columns
+
+            capital      = init_cap
+            shares       = 0.0
+            held_symbol  = None
+            entry_price  = 0.0
+            entry_date   = None
+            equity_vals  = [capital]
+            equity_dts   = [test_dates[0]]
+            all_trades   = []
+            timeline     = []
+
+            def _close_position(sym, px, ds, reason):
+                nonlocal capital, shares, held_symbol, entry_price, entry_date
+                exit_adj   = px * (1 - cfg.slippage)
+                comm       = exit_adj * shares * cfg.commission
+                proceeds   = exit_adj * shares - comm
+                cost_basis = entry_price * shares
+                pnl        = proceeds - cost_basis
+                capital   += proceeds
+                ret_pct    = float(pnl / (cost_basis + 1e-8) * 100)
+                hold       = (pd.Timestamp(ds) - pd.Timestamp(entry_date)).days
+                all_trades.append({
+                    'symbol': sym, 'type': 'LONG', 'action': 'LONG',
+                    'entry_date': entry_date, 'exit_date': ds,
+                    'entry_price': round(entry_price, 4),
+                    'exit_price':  round(float(exit_adj), 4),
+                    'pnl':         round(float(pnl), 2),
+                    'return_pct':  round(ret_pct, 2),
+                    'actual_return_pct': round(ret_pct, 2),
+                    'predicted_return_pct': 0.0,
+                    'exit_reason': reason,
+                    'hold_days':   max(hold, 0),
+                })
+                shares = 0.0
+                held_symbol = None
+
+            def _open_position(sym, px, ds):
+                nonlocal capital, shares, held_symbol, entry_price, entry_date
+                entry_adj   = px * (1 + cfg.slippage)
+                pos_val     = capital
+                shares      = pos_val / entry_adj
+                capital    -= pos_val + entry_adj * shares * cfg.commission
+                held_symbol = sym
+                entry_price = entry_adj
+                entry_date  = ds
+
+            for j in range(len(test_dates)):
+                ds  = test_dates[j]
+                row_px  = test_prices.iloc[j]
+                row_mom = test_mom.iloc[j]
+                row_sma = test_sma200.iloc[j]
+
+                ranked = []
+                for sym in offensive_avail:
+                    m = row_mom.get(sym)
+                    if m is None or pd.isna(m):
+                        continue
+                    ranked.append((float(m), sym))
+
+                target = None
+                if ranked:
+                    ranked.sort(key=lambda x: x[0], reverse=True)
+                    best_mom, best_sym = ranked[0]
+                    best_px  = row_px.get(best_sym)
+                    best_sma = row_sma.get(best_sym)
+                    sma_ok = (not dm_use_sma200) or (best_px is not None and best_sma is not None
+                                                     and not pd.isna(best_sma) and best_px > best_sma)
+                    if best_mom > 0 and sma_ok:
+                        target = best_sym
+                    elif defensive_ok:
+                        target = dm_defensive
+
+                if target is not None and held_symbol is not None and target != held_symbol:
+                    px_old = row_px.get(held_symbol)
+                    if px_old is not None and not pd.isna(px_old):
+                        _close_position(held_symbol, float(px_old), ds, 'ROTATE')
+                if target is None and held_symbol is not None:
+                    px_old = row_px.get(held_symbol)
+                    if px_old is not None and not pd.isna(px_old):
+                        _close_position(held_symbol, float(px_old), ds, 'EXIT_TO_CASH')
+                if target is not None and held_symbol is None:
+                    px_new = row_px.get(target)
+                    if px_new is not None and not pd.isna(px_new) and px_new > 0:
+                        _open_position(target, float(px_new), ds)
+
+                mtm = 0.0
+                if held_symbol is not None:
+                    px_now = row_px.get(held_symbol)
+                    if px_now is not None and not pd.isna(px_now):
+                        mtm = shares * float(px_now)
+                port_val = capital + mtm
+                equity_vals.append(port_val)
+                equity_dts.append(ds)
+                timeline.append({'date': ds, 'symbol': held_symbol or 'CASH'})
+
+            if held_symbol is not None:
+                last_px = test_prices.iloc[-1].get(held_symbol)
+                if last_px is not None and not pd.isna(last_px):
+                    _close_position(held_symbol, float(last_px), test_dates[-1], 'END_OF_TEST')
+            equity_vals[-1] = capital
+
+            final_val    = float(equity_vals[-1])
+            total_ret    = (final_val - init_cap) / init_cap * 100
+            eq_arr       = np.array(equity_vals, dtype=float)
+            daily_rets   = np.diff(eq_arr) / (eq_arr[:-1] + 1e-8)
+            sharpe       = (np.mean(daily_rets) / (np.std(daily_rets) + 1e-10)) * np.sqrt(252) if len(daily_rets) > 1 else 0.0
+            down_diff    = np.minimum(daily_rets, 0.0)
+            down_std     = float(np.sqrt(np.mean(down_diff ** 2))) if len(daily_rets) > 1 else 0.0
+            sortino      = (np.mean(daily_rets) / (down_std + 1e-10)) * np.sqrt(252) if len(daily_rets) > 1 else 0.0
+            running_max  = np.maximum.accumulate(eq_arr)
+            drawdowns    = (eq_arr - running_max) / (running_max + 1e-8)
+            max_dd       = float(drawdowns.min() * 100)
+            total_ret_dec = (eq_arr[-1] / eq_arr[0]) - 1 if eq_arr[0] > 0 else 0.0
+            n_years       = max(len(daily_rets) / 252, 0.01)
+            ann_ret       = float((1 + total_ret_dec) ** (1 / n_years) - 1)
+            calmar        = ann_ret / max(abs(max_dd / 100), 0.001)
+            winning      = [t for t in all_trades if t['pnl'] > 0]
+            losing       = [t for t in all_trades if t['pnl'] <= 0]
+            win_rate     = len(winning) / len(all_trades) * 100 if all_trades else 0
+            avg_win      = float(np.mean([t['pnl'] for t in winning])) if winning else 0
+            avg_loss     = float(np.mean([t['pnl'] for t in losing]))  if losing  else 0
+            profit_factor = abs(avg_win * len(winning) / (avg_loss * len(losing) + 1e-8)) if losing else float('inf')
+            avg_hold_days = float(np.mean([t['hold_days'] for t in all_trades])) if all_trades else 0.0
+
+            bh_close = test_prices[offensive_avail[0]].to_numpy(dtype=float)
+            bh_p0    = float(bh_close[0])
+            bh_vals  = [round(init_cap * float(p) / (bh_p0 + 1e-10), 2) for p in bh_close]
+            bh_final_val = float(bh_vals[-1]) if bh_vals else init_cap
+            bh_ret_pct   = (bh_final_val - init_cap) / init_cap * 100
+
+            bench = _benchmark_metrics(loader, test_dates[0], test_dates[-1])
+            spy_ret_b = bench['spy_return_pct']
+            sf_ret_b  = bench['sixtyforty_return_pct']
+            alpha_vs_spy  = round(total_ret - spy_ret_b, 2) if spy_ret_b is not None else None
+            alpha_vs_6040 = round(total_ret - sf_ret_b, 2)  if sf_ret_b  is not None else None
+
+            rotated_to = sorted({t['symbol'] for t in all_trades} | ({held_symbol} if held_symbol else set()))
+
+            return jsonify({
+                'status': 'success',
+                'watchlist': dm_symbols,
+                'period': {
+                    'test_start':  test_dates[0],
+                    'test_end':    test_dates[-1],
+                    'n_test_days': len(test_dates),
+                    'n_train_days': 0,
+                    'train_end':   start_date,
+                },
+                'config': {
+                    'initial_capital': init_cap,
+                    'mode': mode,
+                    'dm_assets': offensive_avail,
+                    'dm_defensive': dm_defensive,
+                    'dm_lookback': dm_lookback,
+                    'dm_use_sma200': dm_use_sma200,
+                    'allow_short': False,
+                    'use_llm': False,
+                },
+                'llm_stats': {'calls': 0, 'cache_hits': 0, 'errors': 0, 'vetoed': 0,
+                              'budget_skipped': 0, 'sent_real_news': 0,
+                              'sent_implied_only': 0, 'avg_latency': 0.0},
+                'risk_gate_stats': {'enabled': False},
+                'filter_counts': None,
+                'performance': {
+                    'initial_capital':    init_cap,
+                    'final_value':        round(final_val, 2),
+                    'final_capital':      round(final_val, 2),
+                    'total_return_pct':   round(total_ret, 2),
+                    'buy_hold_return_pct': round(bh_ret_pct, 2),
+                    'sharpe_ratio':       round(float(sharpe), 3),
+                    'sortino_ratio':      round(float(sortino), 3),
+                    'calmar_ratio':       round(float(calmar), 3),
+                    'max_drawdown_pct':   round(max_dd, 2),
+                    'total_trades':       len(all_trades),
+                    'win_rate_pct':       round(win_rate, 1),
+                    'win_rate':           round(win_rate, 1),
+                    'avg_win':            round(avg_win, 2),
+                    'avg_loss':           round(avg_loss, 2),
+                    'profit_factor':      round(float(profit_factor), 2) if profit_factor != float('inf') else 99.0,
+                    'avg_hold_days':      round(avg_hold_days, 1),
+                    'spy_return_pct':         bench['spy_return_pct'],
+                    'spy_sharpe':             bench['spy_sharpe'],
+                    'spy_maxdd_pct':          bench['spy_maxdd_pct'],
+                    'sixtyforty_return_pct':  bench['sixtyforty_return_pct'],
+                    'sixtyforty_sharpe':      bench['sixtyforty_sharpe'],
+                    'sixtyforty_maxdd_pct':   bench['sixtyforty_maxdd_pct'],
+                    'alpha_vs_spy_pct':       alpha_vs_spy,
+                    'alpha_vs_6040_pct':      alpha_vs_6040,
+                },
+                'equity_curve': {
+                    'dates':           equity_dts,
+                    'values':          [round(v, 2) for v in equity_vals],
+                    'portfolio_value': [round(v, 2) for v in equity_vals],
+                    'buy_hold_value':  bh_vals,
+                },
+                'trades': all_trades[-100:],
+                'per_asset': [{
+                    'symbol':   sym,
+                    'trades':   sum(1 for t in all_trades if t['symbol'] == sym),
+                    'pnl':      round(sum(t['pnl'] for t in all_trades if t['symbol'] == sym), 2),
+                    'win_rate': round(
+                        sum(1 for t in all_trades if t['symbol'] == sym and t['pnl'] > 0)
+                        / max(sum(1 for t in all_trades if t['symbol'] == sym), 1) * 100, 1),
+                } for sym in rotated_to],
+                'active_timeline': timeline,
+                'rotated_to': rotated_to,
+                'signal_stats': {
+                    'total_signals':    len(test_dates),
+                    'filtered_signals': len(all_trades),
+                    'threshold':        0.0,
+                    'max_signal':       0.0,
+                    'filter_percentile': 0.0,
+                },
+                'leakage_proof': True,
+            })
+        except ValueError as ve:
+            return jsonify({'status': 'error', 'error': str(ve)}), 400
+        except Exception as e:
+            logger.error(f"Dual-momentum backtest error: {traceback.format_exc()}")
             return jsonify({'status': 'error', 'error': str(e)}), 500
 
     try:

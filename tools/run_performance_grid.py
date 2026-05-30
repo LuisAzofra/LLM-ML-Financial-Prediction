@@ -169,6 +169,23 @@ INDEX_TREND = {'mode': 'index_trend', 'initial_capital': 100_000, 'use_llm': Fal
 VARIANT_CONFIGS['index_trend'] = ('INDEX_TREND', INDEX_TREND,
                                   '/tmp/perf_grid_index_trend_result.json')
 
+DUAL_MOM = {'mode': 'dual_momentum', 'dm_assets': ['SPY', 'EFA'],
+            'dm_defensive': 'TLT', 'dm_use_sma200': False,
+            'initial_capital': 100_000, 'use_llm': False}
+VARIANT_CONFIGS['dual_mom'] = ('DUAL_MOMENTUM_GEM', DUAL_MOM,
+                               '/tmp/perf_grid_dual_mom_result.json')
+
+DUAL_MOM_GROWTH = {'mode': 'dual_momentum', 'dm_assets': ['QQQ', 'EFA'],
+                   'dm_defensive': 'TLT', 'dm_use_sma200': False,
+                   'initial_capital': 100_000, 'use_llm': False}
+VARIANT_CONFIGS['dual_mom_growth'] = ('DUAL_MOMENTUM_GROWTH', DUAL_MOM_GROWTH,
+                                      '/tmp/perf_grid_dual_mom_growth_result.json')
+
+FABER_QQQ = {'mode': 'index_trend', 'index_symbol': 'QQQ',
+             'initial_capital': 100_000, 'use_llm': False}
+VARIANT_CONFIGS['faber_qqq'] = ('FABER_QQQ', FABER_QQQ,
+                                '/tmp/perf_grid_faber_qqq_result.json')
+
 
 def call(start_date: str, end_date: str, body_base: dict) -> dict:
     body = {**body_base, 'start_date': start_date, 'end_date': end_date}
