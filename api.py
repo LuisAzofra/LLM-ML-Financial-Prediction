@@ -2116,6 +2116,7 @@ def paper_autonomous_backtest():
     disable_golden_cross = bool(body.get('disable_golden_cross', False))
     regime_adx_min_override = body.get('regime_adx_min')   # None ⇒ usa default cfg
     max_concurrent = int(body.get('max_concurrent', 3))
+    sizing_mode = str(body.get('sizing_mode', 'kelly')).lower()
     debug_filter_counts = bool(body.get('debug_filter_counts', False))
     # Tier 4.2 — candidatos C2-C5 (todos opt-in, default off).
     # C2: vol-targeting portfolio-level (Moreira-Muir 2017): escala size por
@@ -2948,7 +2949,13 @@ def paper_autonomous_backtest():
                     kelly    = _kelly(bday['pred'], eff_conf, stop_pct)
                     rel_str  = min(ss / max(threshold, 1e-9), 3.0)
                     vol_sc   = float(np.clip(cfg.target_vol / max(bday['volatility'], 0.05), 0.3, 2.0))
-                    size_pct = min(kelly * rel_str * cfg.kelly_scale * vol_sc, cfg.max_position_pct)
+                    if sizing_mode == 'inverse_vol':
+                        vol_i    = max(float(bday['volatility']), 0.05)
+                        size_pct = float(np.clip(
+                            (cfg.target_vol / vol_i) / MAX_CONCURRENT,
+                            0.0, cfg.max_position_pct))
+                    else:
+                        size_pct = min(kelly * rel_str * cfg.kelly_scale * vol_sc, cfg.max_position_pct)
                     # ── Tier 4.2 C2: vol-target overlay portfolio-level (Moreira-Muir 2017) ──
                     if enable_vol_target_overlay and len(equity_vals) >= 21:
                         # realized portfolio vol annualizada de los últimos 20d
@@ -2967,13 +2974,16 @@ def paper_autonomous_backtest():
                     # ── Tier 1.3: aplicar caps + vol-target overlay del risk_gate ──
                     if risk_gate is not None:
                         eq_now = equity_vals[-1] if equity_vals else cfg.initial_capital
-                        open_val_total = sum(
-                            (positions[s]['shares'] * asset_maps[s][ds]['close'])
-                            if positions[s]['type'] == 'LONG'
-                            else (positions[s]['cost_basis'] - positions[s]['shares'] * asset_maps[s][ds]['close'])
-                            for s in positions
-                            if s in asset_maps and ds in asset_maps[s]
-                        )
+                        open_val_total = 0.0
+                        for s in positions:
+                            if s in asset_maps and ds in asset_maps[s]:
+                                cp_s = asset_maps[s][ds]['close']
+                            else:
+                                cp_s = last_close.get(s, positions[s]['entry_price'])
+                            if positions[s]['type'] == 'LONG':
+                                open_val_total += positions[s]['shares'] * cp_s
+                            else:
+                                open_val_total += positions[s]['cost_basis'] - positions[s]['shares'] * cp_s
                         allowed, size_pct, _reason = risk_gate.gate_new_position(
                             ds=ds, equity=eq_now,
                             open_position_value_total=open_val_total,
