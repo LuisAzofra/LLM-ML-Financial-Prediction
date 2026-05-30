@@ -510,6 +510,28 @@ El *tradeoff* entre riesgo y rentabilidad resulta ineludible. El *sizing* por ri
 
 Sobre el universo amplio y aleatorio del S&P 500 —en lugar de las acciones elegidas a posteriori—, la estrategia **pierde dinero a todos los plazos** (retorno medio en torno al −11%, superando al *buy & hold* solo en el ~8% de los casos). Este resultado confirma que buena parte del rendimiento aparente del universo reducido se debía a la selección de activos en retrospectiva, y no a una habilidad genuina del sistema.
 
+#### 5.3.7 Validación Fuera de Muestra y Mejora Honesta sobre el Mejor Baseline (Lockbox 2024-2025)
+
+A partir de la mejor configuración honesta identificada —una estrategia de *timing* de tendencia tipo Faber sobre el Nasdaq-100 (mantener QQQ mientras cotiza por encima de su media de 200 sesiones, y efectivo en caso contrario)— se ejecutó la validación fuera de muestra planteada como línea futura. El protocolo se endureció en tres aspectos: (1) muestreo de **muchas fechas de inicio aleatorias con semilla fija** por horizonte (de 2 semanas a 2 años, 30 ventanas por horizonte); (2) separación de dos universos temporales **disjuntos** —DESARROLLO (2014-2023) para diseñar y LOCKBOX (2024-2025) reservado y evaluado una sola vez—; y (3) incorporación del benchmark QQQ, una caché de precios causal, un **test de causalidad** automático (mutar los precios posteriores a *t* no altera la señal en *t*) y la *Deflated Sharpe Ratio* para penalizar el número de configuraciones probadas.
+
+**Mejora aceptada — remuneración del efectivo.** El *baseline* dejaba el efectivo al 0% mientras estaba fuera de mercado (en torno al 20-30% del tiempo). Acreditar el tipo libre de riesgo (letra del Tesoro a 13 semanas, con un retardo de un día para garantizar la causalidad) sobre ese efectivo no es una apuesta de estrategia, sino contabilidad correcta. La mejora es estricta y estadísticamente significativa en todos los horizontes, tanto en desarrollo como en el lockbox (Tabla 5.5), sin aumentar el *drawdown* y sin un solo caso en que empeore (180 de 180 ventanas). Al no introducir ningún parámetro ajustado, está libre de sobreajuste.
+
+**Tabla 5.5: Efecto de la remuneración del efectivo (Δ retorno frente al baseline Faber-QQQ, IC 95%)**
+
+| Plazo | DESARROLLO 2014-2023 | LOCKBOX 2024-2025 |
+|-------|---------------------:|------------------:|
+| 6 meses | +0.15 [+0.06, +0.26] | +0.36 [+0.23, +0.48] |
+| 1 año | +0.34 [+0.15, +0.58] | +0.68 [+0.57, +0.79] |
+| 2 años | +0.59 [+0.37, +0.82] | +1.12 [+1.07, +1.17] |
+
+El efecto es mayor en el lockbox porque 2024-2025 cursó con tipos del 4-5%, frente al entorno de tipos próximos a cero de buena parte de 2014-2021.
+
+**Comparación frente a benchmarks (lockbox, fuera de muestra).** La estrategia Faber-QQQ con efectivo remunerado **bate de forma robusta a la cartera 60/40**: *alpha* de +7.99 puntos a 1 año y **+19.34 a 2 años, superándola en el 100% de las ventanas**, con un *drawdown* medio en torno al −13%. Frente al SPY **empata o la supera ligeramente** (+0.61 y +0.78 puntos a 1 y 2 años) con menor *drawdown*. El matiz honesto es doble: frente al 60/40 esta ventaja es sobre todo **beta de crecimiento más filtro de caídas**, no alpha; y la estrategia **sigue sin batir a su propio subyacente (QQQ)** en un mercado alcista —algo estructuralmente inevitable para una estrategia *long/flat*, cuyo valor es esquivar *drawdown* en los mercados bajistas, no superar al índice en los alcistas—.
+
+**Reducción de *whipsaw* (rechazada como mejora de retorno).** Se evaluaron tres variantes anti-*whipsaw* sobre la base con efectivo remunerado: banda de histéresis, rebalanceo mensual (el Faber canónico) y voto multi-*lookback*. Ninguna supera a la base en media y, en el lockbox (alcista puro), la penalizan. El desglose por régimen es revelador: el rebalanceo mensual es un **filtro de caídas sensiblemente mejor** —en las ventanas con QQQ a la baja pierde −1.16% frente al −6.13% del índice y lo supera el 81% de las veces, frente al 34% del Faber diario, que se desgasta en *whipsaw*— pero se retrasa alrededor de un punto en los tramos alcistas. Queda, por tanto, como palanca de gestión de riesgo, no de retorno.
+
+**El aprendizaje automático y el LLM aplicados "correctamente" tampoco generan edge.** Siguiendo a López de Prado, se aplicó *meta-labeling* sobre la señal primaria de Faber: un clasificador secundario que predice la probabilidad de que cada entrada concreta resulte rentable —con etiquetado por triple barrera, validación mediante *Purged K-Fold* con embargo y ponderación por unicidad de etiquetas solapadas—, empleado solo para reducir o vetar el tamaño, nunca para invertir la dirección. El resultado fuera de fold es un **nulo rotundo**: un AUC de 0.385 (por debajo del azar) frente a un nulo de etiquetas permutadas de ≈0.53, lo que delata la ausencia de estructura aprendible y, a la vez, que la purga elimina la fuga de información que falsearía un *edge*. Un test análogo y pre-registrado del LLM local (Qwen2.5-1.5B) como meta-filtro —puntuando la calidad de cada entrada a partir del estado de mercado normalizado, sin fecha ni precio absoluto para que no pueda reconocer el momento histórico— arroja igualmente un nulo (AUC de 0.460; el modelo puntúa casi todo como "buena entrada", con un claro sesgo de optimismo). Ni el componente aprendido ni el LLM añaden información accionable para seleccionar o dimensionar las entradas.
+
 ### 5.4 Discusión de Resultados
 
 Los resultados obtenidos confirman varios hallazgos de la literatura:
@@ -521,6 +543,8 @@ Los resultados obtenidos confirman varios hallazgos de la literatura:
 3. **Valor del sentimiento**: El análisis de sentimiento mediante LLM proporciona información adicional valiosa, especialmente durante eventos de mercado significativos.
 
 4. **Ausencia de alpha sostenible ajustado por riesgo**: una vez eliminados los sesgos metodológicos y evaluado el sistema sobre la cuadrícula multi-régimen y un universo sin sesgo de supervivencia, la sofisticación añadida (ML, LLM y arquitectura multi-agente) no se traduce en una ventaja sobre la inversión indexada pasiva en términos ajustados por riesgo. Este hallazgo es plenamente coherente con la hipótesis del mercado eficiente [17].
+
+5. **Confirmación fuera de muestra y reorientación hacia la gestión de riesgo**: la validación posterior en un *lockbox* temporal (2024-2025) con metodología purgada (Sección 5.3.7) refuerza este hallazgo desde un ángulo distinto. Aplicar el aprendizaje automático "correctamente" —*meta-labeling* a la López de Prado con validación purgada— y el LLM como meta-filtro de entradas resultan ambos nulos fuera de muestra; la única mejora robusta es de naturaleza contable (remunerar el efectivo ocioso al tipo libre de riesgo). La utilidad defendible del sistema se sitúa, por tanto, en la **gestión de riesgo**: una exposición a crecimiento con filtro de caídas que bate a la cartera 60/40 y empata al SPY con menor *drawdown*, antes que en la generación de alpha.
 
 ---
 
@@ -552,6 +576,8 @@ Las principales conclusiones son:
 
 - En un universo realista sin sesgo de supervivencia el sistema deja de ser rentable, lo que confirma que parte del rendimiento aparente procedía de la selección de activos en retrospectiva.
 
+- Una validación posterior fuera de muestra (lockbox 2024-2025) sobre la configuración más honesta —un *timing* de tendencia tipo Faber sobre el Nasdaq-100— arroja una conclusión matizada y constructiva: la única mejora robusta es de naturaleza **contable** (remunerar el efectivo ocioso al tipo libre de riesgo, que bate al *baseline* en todos los horizontes y a la cartera 60/40 en el 100% de las ventanas a 2 años con menor *drawdown*), mientras que aplicar el aprendizaje automático "correctamente" (*meta-labeling* a la López de Prado con validación purgada) y el LLM como meta-filtro resultan **nulos**. Se confirma así, desde el ángulo de una sola estrategia bien aislada, que el valor reside en la **gestión de riesgo** (beta de crecimiento con menor *drawdown*) y no en una ventaja predictiva, sin que la estrategia llegue a batir a su propio subyacente en mercado alcista.
+
 Este resultado es coherente con la hipótesis del mercado eficiente y con la literatura: un sistema técnico operando sobre datos diarios no obtiene una ventaja estructural sostenible en estos activos. Lejos de constituir un fracaso, se trata de un resultado válido y defendible. El valor del trabajo reside en tres elementos: (1) un **sistema completo y funcional** *end-to-end* (datos reales → ML + GARCH → multi-agente con LLM → gestión de riesgo → backtesting → interfaz); (2) una **metodología de evaluación rigurosa**, sin *look-ahead*, con test de sesgo de supervivencia, benchmarks justos y conciencia del sobreajuste (*Deflated Sharpe* / PBO); y (3) un **hallazgo honesto**: la sofisticación no se traduce en alpha sobre el indexado pasivo en términos ajustados por riesgo.
 
 ### 6.2 Limitaciones
@@ -568,13 +594,13 @@ El trabajo presenta las siguientes limitaciones:
 
 ### 6.3 Líneas Futuras de Investigación
 
-Se proponen las siguientes líneas de investigación futura:
+Se proponen las siguientes líneas de investigación futura. Las tres primeras se abordaron ya en una iteración posterior, descrita en la Sección 5.3.7, y se mantienen aquí enriquecidas con el aprendizaje obtenido:
 
-1. **Validación con *lockbox* temporal**: reservar el periodo 2024 en adelante como datos nunca vistos durante el desarrollo, de forma que constituya una prueba final genuinamente fuera de muestra.
+1. **Validación con *lockbox* temporal** *(abordada en la Sección 5.3.7)*: se reservó el periodo 2024-2025 como datos nunca vistos y se evaluó una sola vez; conviene extender esta práctica conforme avance el calendario y a otros subyacentes e índices.
 
-2. **Estimación de la probabilidad de sobreajuste**: emplear *Combinatorial Purged Cross-Validation* para calcular la *Probability of Backtest Overfitting* (PBO) de cualquier mejora propuesta antes de darla por buena, evitando confundir suerte con habilidad.
+2. **Estimación de la probabilidad de sobreajuste** *(parcialmente abordada)*: se incorporaron la validación purgada con embargo (*Purged K-Fold*) y la *Deflated Sharpe Ratio*; queda pendiente el cálculo sistemático de la *Probability of Backtest Overfitting* (PBO) mediante *Combinatorial Purged Cross-Validation* para cada mejora candidata.
 
-3. **Reorientación del sistema**: explorar su uso como herramienta de **gestión de riesgo** (capturar la subida del mercado con menor *drawdown*) o de **análisis y apoyo a la decisión** (el motor multi-agente con LLM como soporte al inversor), donde su utilidad es más defendible que como generador de alpha.
+3. **Reorientación del sistema (confirmada por la evidencia fuera de muestra)**: los resultados del lockbox respaldan su uso como herramienta de **gestión de riesgo** (exposición a crecimiento con filtro de caídas, que bate a la cartera 60/40 con menor *drawdown*); la línea futura natural es formalizar *overlays* de control de *drawdown* y volatilidad y un marco de asignación tipo *risk parity*, validados siempre fuera de muestra.
 
 4. **Integración con LLMs más potentes**: Evaluar el uso de GPT-4 o Claude para comparar el rendimiento.
 
