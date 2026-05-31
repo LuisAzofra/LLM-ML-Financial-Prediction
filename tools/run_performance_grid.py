@@ -169,6 +169,10 @@ INDEX_TREND = {'mode': 'index_trend', 'initial_capital': 100_000, 'use_llm': Fal
 VARIANT_CONFIGS['index_trend'] = ('INDEX_TREND', INDEX_TREND,
                                   '/tmp/perf_grid_index_trend_result.json')
 
+# ML puro: el ensemble (RF/XGBoost/LightGBM) predice y DECIDE las operaciones.
+ML_PURE = {'mode': 'ml', 'initial_capital': 100_000, 'use_llm': False}
+VARIANT_CONFIGS['ml_pure'] = ('ML_PURE', ML_PURE, '/tmp/perf_grid_ml_pure_result.json')
+
 DUAL_MOM = {'mode': 'dual_momentum', 'dm_assets': ['SPY', 'EFA'],
             'dm_defensive': 'TLT', 'dm_use_sma200': False,
             'initial_capital': 100_000, 'use_llm': False}

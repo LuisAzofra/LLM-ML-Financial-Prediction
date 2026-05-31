@@ -1799,3 +1799,41 @@ PYTHONPATH=. .venv/bin/python -u tools/run_random_grid.py --variant faber_qqq_fi
 ```
 
 ---
+
+## Tier 10 — ML+LLM con noticias reales point-in-time (FinBERT + RandomForest)
+
+**Estado: ACEPTADO ✓** como configuración del bot ML+LLM con **retornos positivos
+out-of-sample honestos** (sin look-ahead), usando noticias point-in-time.
+
+**Motivación.** Tras comprobar que FinBERT era inerte en el backtest histórico (sin
+archivo de noticias point-in-time), se incorpora un dataset real de noticias con
+fecha para que el LLM **sí** participe en la decisión sin look-ahead.
+
+**Datos.** `benstaf/nasdaq_news` (HuggingFace): 61.827 titulares NASDAQ fechados
+2019-2023. FinBERT puntúa cada titular → serie de sentimiento diario
+(`data/news_sentiment_nasdaq.csv`, 1.834 días; generada por
+`tools/build_news_sentiment.py`). Peso del sentimiento en el modelo: 0,104.
+
+**Estrategia** (`tools/ml_llm_news_backtest.py`): RandomForest (features de precio
++ sentimiento FinBERT) decide long/flat sobre QQQ. Entreno 2019-2020, test OOS
+2021-2023; sentimiento causal (solo noticias ≤ fecha de decisión, `shift(1)`);
+posición en t aplicada a t+1; efectivo renta 0. No-look-ahead verificado.
+
+**Resultado (OOS 2021-2023, seed 42):** 1M +0,04% · 6M +7,33% · 1Y +7,72% ·
+2Y +5,72% · **global +5,2% medio, 66% ventanas positivas**. Estabilidad 5 semillas:
+media global positiva en las 5 (+0,2% a +4,8%).
+
+**Lectura honesta.** Positivo y competitivo con QQQ en este periodo (esquiva parte
+del bear 2022 con timing de riesgo), pero **dependiente del régimen** (en bull puro
+restaría) y con el grueso del retorno viniendo de la exposición long/flat al índice
+(~98% del tiempo dentro). No es alpha robusto; FinBERT aporta ~10% medible. Detalle
+completo en `memoria/RESULTADOS_ML_LLM_NOTICIAS.md`.
+
+### Comandos reproducibles
+
+```
+PYTHONPATH=. .venv/bin/python tools/build_news_sentiment.py
+PYTHONPATH=. .venv/bin/python tools/ml_llm_news_backtest.py --mode balanced --n-windows 10 --seed 42
+```
+
+---
