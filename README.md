@@ -15,7 +15,8 @@ Este proyecto implementa un sistema híbrido completo que combina modelos de Mac
 - **Noticias financieras**: RSS feeds de fuentes reales (Yahoo Finance, MarketWatch, CoinDesk)
 - **Indicadores de sentimiento**: Fear & Greed Index
 
-### ✅ LLM Gratuito
+### ✅ LLM / NLP Gratuito
+- **FinBERT** (`ProsusAI/finbert`): modelo Transformer **finetuneado** sobre texto financiero — proveedor principal del agente de sentimiento (ver `utils/finbert_sentiment.py`)
 - **Ollama**: Ejecución local de Llama 3.2, Mistral
 - **Hugging Face**: API gratuita con rate limits
 - **Fallback**: Análisis basado en reglas si no hay LLM disponible
@@ -283,6 +284,7 @@ El sistema está basado en papers de investigación de vanguardia:
 | arch | Modelos GARCH |
 | yfinance | Datos financieros |
 | feedparser | RSS feeds |
+| transformers + FinBERT | Sentimiento financiero finetuneado |
 | Ollama | LLM local |
 | HuggingFace | LLM API gratuita |
 

@@ -206,6 +206,14 @@ FABER_QQQ_HONEST = {**FABER_QQQ, 'parking_mode': 'rate', 'rebalance_frequency': 
 VARIANT_CONFIGS['faber_qqq_honest'] = ('FABER_QQQ_HONEST', FABER_QQQ_HONEST,
                                        '/tmp/perf_grid_faber_qqq_honest_result.json')
 
+# FinBERT: Faber-QQQ+parking + filtro defensivo de re-entrada con FinBERT
+# (modelo finetuneado financiero). El filtro es causal/inerte en histórico
+# (no hay noticias point-in-time) → reproduce el baseline en backtest; actúa
+# en ventanas recientes / en vivo. Ver utils/finbert_sentiment.py.
+FABER_QQQ_FINBERT = {**FABER_QQQ_PARK, 'use_finbert_filter': True}
+VARIANT_CONFIGS['faber_qqq_finbert'] = ('FABER_QQQ_FINBERT', FABER_QQQ_FINBERT,
+                                        '/tmp/perf_grid_faber_qqq_finbert_result.json')
+
 
 def call(start_date: str, end_date: str, body_base: dict) -> dict:
     body = {**body_base, 'start_date': start_date, 'end_date': end_date}

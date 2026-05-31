@@ -2402,6 +2402,24 @@ def paper_autonomous_backtest():
                     vote_arrays.append(series.to_numpy(dtype=float)[test_mask])
                 vote_threshold = int(vt) if vt is not None else int(np.ceil(len(vote_lookbacks) / 2))
 
+            # ── Filtro defensivo FinBERT (opt-in, default off) ──────────────
+            # Bloquea la RE-ENTRADA si el flujo de noticias del índice es
+            # fuertemente bajista según FinBERT. Causal: inerte en fechas
+            # históricas (no hay noticias point-in-time) → reproduce EXACTO el
+            # baseline. Solo actúa en ventanas recientes / en vivo.
+            use_finbert_filter = bool(body.get('use_finbert_filter', False))
+            finbert_neg_threshold = float(body.get('finbert_neg_threshold', -0.5))
+            finbert_news_symbol = str(body.get('finbert_news_symbol', index_symbol)).upper()
+            finbert_blocks = 0
+            finbert_active_days = 0
+            _finbert_fn = None
+            if use_finbert_filter:
+                try:
+                    from utils.finbert_sentiment import index_news_sentiment as _finbert_fn
+                except Exception as _fe:
+                    logger.warning(f"FinBERT filter no disponible: {_fe}")
+                    _finbert_fn = None
+
             capital     = init_cap
             shares      = 0.0
             in_market   = False
@@ -2442,6 +2460,18 @@ def paper_autonomous_backtest():
 
                 if is_rebal[j]:
                     if not in_market and sig_bull:
+                        # Filtro FinBERT: si las noticias recientes del índice
+                        # son fuertemente bajistas, posponer la re-entrada.
+                        if _finbert_fn is not None:
+                            fb = _finbert_fn(finbert_news_symbol, as_of_date=ds)
+                            if fb.get('active'):
+                                finbert_active_days += 1
+                                if fb.get('net', 0.0) < finbert_neg_threshold:
+                                    finbert_blocks += 1
+                                    port_val = capital + (shares * px if in_market else 0.0)
+                                    equity_vals.append(port_val)
+                                    equity_dts.append(ds)
+                                    continue
                         entry_adj = px * (1 + cfg.slippage)
                         pos_val   = capital
                         shares    = pos_val / entry_adj
@@ -2610,6 +2640,13 @@ def paper_autonomous_backtest():
                     'days_parked':  parking_days,
                     'interest_usd': round(parking_interest, 2),
                     'return_pct':   round(parking_interest / init_cap * 100, 2),
+                },
+                'finbert_stats': {
+                    'enabled':            use_finbert_filter,
+                    'news_symbol':        finbert_news_symbol if use_finbert_filter else None,
+                    'neg_threshold':      finbert_neg_threshold if use_finbert_filter else None,
+                    'active_days':        finbert_active_days,
+                    'reentries_blocked':  finbert_blocks,
                 },
                 'signal_stats': {
                     'total_signals':    len(test_dates),

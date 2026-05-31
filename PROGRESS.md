@@ -1736,3 +1736,66 @@ Todas con IC95% negativo (mensual/banda) o nulo (voto) → **ninguna mejora el r
 ```
 
 ---
+
+## Tier 9 — FinBERT: modelo financiero finetuneado en la capa de sentimiento (rama finbert-positive-returns)
+
+**Estado: ACEPTADO ✓** como integración de un modelo NLP finetuneado financiero y como
+configuración de referencia con **retornos positivos robustos dentro y fuera de muestra**.
+
+**Contexto y objetivo.** Tras los Tier 7/8 (el sistema ML/LLM complejo no genera alpha;
+la mejor config honesta es Faber-QQQ+parking), se integra un modelo **finetuneado
+específicamente para texto financiero** — **FinBERT** (`ProsusAI/finbert`, BERT afinado
+sobre Financial PhraseBank, Malo et al. 2014) — en lugar de VADER / un LLM generalista
+pequeño. Dos objetivos: (1) que la capa de sentimiento use un modelo *purpose-built*
+y citable; (2) entregar una configuración del bot con **retornos positivos** en los 4
+horizontes pedidos (1M/6M/1Y/2Y), validada con fechas aleatorias dev + lockbox.
+
+**Implementación** (`utils/finbert_sentiment.py`, todo default-off / aditivo):
+- `score_text` / `score_headlines`: clasifican texto financiero → `net = P(pos) − P(neg)`.
+- Enganchado en `LLMClient.analyze_sentiment`: si FinBERT está disponible, es el
+  proveedor de sentimiento del **agente de sentimiento** (sustituye al parser por
+  palabras clave / LLM genérico). Verificado: clasifica 3/3 casos canónicos.
+- Filtro defensivo de re-entrada en `mode=index_trend` (`use_finbert_filter`, hook en
+  `api.py`): no recompra el índice si el flujo de noticias reciente es fuertemente
+  bajista (`net < finbert_neg_threshold`, def. −0.5).
+
+**Diseño causal (clave).** No existe archivo histórico point-in-time de noticias; el
+RSS sirve titulares del momento actual. Por tanto `index_news_sentiment` devuelve
+**inactivo+neutral para fechas > `recency_days` (def. 7) antes de hoy** → el filtro es
+**inerte en backtest histórico** (sin look-ahead, sin usar noticias de hoy para decidir
+en 2018) y **activo solo en ventanas recientes / trading en vivo**. Verificado en vivo:
+captura 20 titulares reales de QQQ y los puntúa (`active=True`); en fecha 2018 `active=False`.
+
+**Validación pareada `faber_qqq_finbert` vs `faber_qqq_park`** (run_random_grid, n=12/horizonte, seed 42):
+el filtro inerte en histórico ⇒ **curva idéntica al baseline** (verificación de no-look-ahead).
+Retornos MEDIOS (% ventanas positivas):
+
+| Plazo | DEV media (%pos) | LOCKBOX media (%pos) |
+|-------|-----------------:|---------------------:|
+| 1M | +0.25% (67%) | +1.75% (83%) |
+| 6M | +8.65% (67%) | +7.09% (83%) |
+| 1Y | +12.40% (67%) | +19.49% (100%) |
+| 2Y | +31.21% (92%) | +35.28% (100%) |
+
+**Todos los horizontes positivos en media y mediana, en dev Y en lockbox.**
+
+**Lectura honesta.** Los retornos positivos provienen del **motor de tendencia
+disciplinado sobre el QQQ + contabilidad correcta del efectivo** (beta de crecimiento +
+filtro de caídas), NO de FinBERT: en backtest histórico el filtro es inerte por
+construcción, así que `faber_qqq_finbert` ≡ `faber_qqq_park`. La aportación de FinBERT es
+(a) una capa de sentimiento **finetuneada y citable** para el sistema en vivo, y (b) un
+**filtro defensivo de noticias** operativo en tiempo real. Coherente con Tier 8.4: el
+sentimiento/LLM no añade alpha accionable en backtest; su valor es cualitativo y de
+gestión de riesgo en vivo. Backtestear FinBERT sobre un dataset histórico de noticias
+point-in-time queda como trabajo futuro.
+
+### Comandos reproducibles
+
+```
+PORT=5057 TFG_DISABLE_TF=1 TFG_LIGHTWEIGHT=1 PRICE_CACHE=1 .venv/bin/python -u api.py &
+PYTHONPATH=. .venv/bin/python tools/smoke_finbert.py
+PYTHONPATH=. .venv/bin/python -u tools/run_random_grid.py --variant faber_qqq_finbert --universe dev     --n-windows 12 --seed 42
+PYTHONPATH=. .venv/bin/python -u tools/run_random_grid.py --variant faber_qqq_finbert --universe lockbox --n-windows 12 --seed 42
+```
+
+---

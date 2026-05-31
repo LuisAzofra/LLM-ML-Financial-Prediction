@@ -486,8 +486,23 @@ class LLMClient:
     def analyze_sentiment(self, text: str) -> Dict[str, Any]:
         """
         Análisis de sentimiento especializado para textos financieros.
-        Usa un prompt específico para extraer sentimiento cuantificado.
+
+        Prioridad: FinBERT (modelo Transformer FINETUNEADO sobre texto
+        financiero) si está disponible — es purpose-built para esta tarea y
+        más fiable que un LLM generalista pequeño o VADER. Si no, recae en el
+        LLM y, en último término, en el parser por palabras clave.
         """
+        try:
+            from utils.finbert_sentiment import is_available, score_text, to_sentiment_parsed
+            if is_available() and (text or "").strip():
+                s = score_text(text)
+                agg = {"net": s["net"], "label": s["label"], "n": 1,
+                       "pos": s["pos"], "neg": s["neg"], "neu": s["neu"]}
+                parsed = to_sentiment_parsed(agg)
+                return {"text": parsed["reasoning"], "parsed": parsed, "provider": "finbert"}
+        except Exception:
+            pass
+
         system_prompt = (
             "You are a senior financial market analyst specializing in sentiment analysis "
             "for investment decisions. You have deep expertise in reading market psychology "
