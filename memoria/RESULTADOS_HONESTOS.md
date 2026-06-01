@@ -176,3 +176,50 @@ esquivar drawdown en los bear. El lockbox 2024-2025, al ser bull puro, no tiene
 mercado bajista que premie esa protección. Coherente con la sección 7: el valor
 defendible de este enfoque es **gestión de riesgo** (exposición a crecimiento con
 filtro de caídas y menos drawdown que el índice), no la generación de alpha.
+
+## 10. FinBERT y bot ML+LLM con noticias reales point-in-time
+
+Tras constatar que la capa de noticias no podía evaluarse sobre el pasado con el
+lector RSS (que solo sirve titulares del momento actual; usar noticias de hoy para
+decidir en 2018 sería look-ahead), se incorporó una base de datos real de noticias
+fechadas para que el LLM participe en la decisión de forma honesta.
+
+**FinBERT (LLM finetuneado financiero).** Se integró `ProsusAI/finbert` (BERT
+afinado sobre Financial PhraseBank) como proveedor del agente de sentimiento
+(`utils/finbert_sentiment.py`, `utils/llm_client.py`) y como filtro defensivo de
+re-entrada en el modo `index_trend` (causal: inerte en histórico, activo en vivo).
+
+**Base de datos de noticias point-in-time.** Dataset `benstaf/nasdaq_news`
+(HuggingFace): **61.827 titulares NASDAQ fechados 2019-2023**. FinBERT puntúa cada
+titular → serie de sentimiento diario (`data/news_sentiment_nasdaq.csv`, 1.834
+días; `tools/build_news_sentiment.py`).
+
+**Estrategia ML+LLM honesta** (`tools/ml_llm_news_backtest.py`). RandomForest
+(momentum 1/3/6m, distancia a SMA200, volatilidad 20d **+ sentimiento FinBERT**)
+decide long/flat sobre QQQ. Entreno 2019-2020, test **out-of-sample 2021-2023**;
+sentimiento del día *t* limitado a noticias con fecha ≤ *t* (`shift(1)`); decisión
+en *t* aplicada al retorno de *t+1*; efectivo renta 0 (conservador). No-look-ahead
+verificado.
+
+| Plazo | ML+LLM medio | mediana | % ventanas positivas | QQQ comprar&mantener |
+|-------|------------:|--------:|:--------------------:|---------------------:|
+| 1 mes  | +0,04% | +0,90% | 62% | −0,30% |
+| 6 meses| +7,33% | +10,99% | 62% | +5,50% |
+| 1 año  | +7,72% | +10,83% | 62% | +4,68% |
+| 2 años | +5,72% | +8,86% | 75% | +0,84% |
+
+**Global OOS +5,2% medio, 66% de ventanas positivas; estable en 5 semillas**
+(media global positiva en las 5). FinBERT pesa 0,104 (10,4%) en el modelo.
+
+**Lectura honesta.** El bot ML+LLM es **positivo de verdad fuera de muestra** con
+noticias reales point-in-time, y competitivo con el QQQ en este periodo porque
+esquiva parte del *bear* de 2022. Pero el grueso del retorno viene de estar long
+QQQ ~98% del tiempo (prima de riesgo del índice) y la ventaja sobre el índice es
+**dependiente del régimen** (en un bull puro restaría, como en el Tier 8.2). No es
+alpha robusto; es gestión de riesgo con un aporte medible (~10%) del sentimiento.
+Coherente con las secciones 7-9 y la hipótesis del mercado eficiente.
+
+**Limitación.** El dataset gratuito cubre 2019-2023, por lo que el OOS es un split
+interno 2021-2023 (un único *bear*) y no el lockbox de precios 2024-2025. Con más
+historia de noticias (varios ciclos) podrían sacarse conclusiones de robustez más
+fuertes.

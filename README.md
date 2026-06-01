@@ -262,6 +262,39 @@ results/
 
 ---
 
+## 📈 Resultados reales (evaluación honesta)
+
+Evaluación rigurosa (sin look-ahead, fuera de muestra, *Deflated Sharpe*). Detalle
+completo en [`memoria/RESULTADOS_HONESTOS.md`](memoria/RESULTADOS_HONESTOS.md),
+[`memoria/RESULTADOS_ML_LLM_NOTICIAS.md`](memoria/RESULTADOS_ML_LLM_NOTICIAS.md) y
+[`PROGRESS.md`](PROGRESS.md) (Tiers 7-10).
+
+- **Hallazgo principal**: la sofisticación (ML + LLM + multi-agente) **no genera
+  alpha** sobre el indexado pasivo ajustando por riesgo — coherente con la
+  hipótesis del mercado eficiente. Resultado negativo válido y defendible.
+- **Bot ML+LLM con noticias reales *point-in-time* (FinBERT + RandomForest)** →
+  **retornos positivos *out-of-sample***. Entreno 2019-2020, test 2021-2023:
+
+  | Plazo | ML+LLM (medio) | % ventanas positivas | QQQ comprar&mantener |
+  |-------|---------------:|:--------------------:|---------------------:|
+  | 1 mes  | +0,04% | 62% | −0,30% |
+  | 6 meses| +7,33% | 62% | +5,50% |
+  | 1 año  | +7,72% | 62% | +4,68% |
+  | 2 años | +5,72% | 75% | +0,84% |
+
+  Global OOS **+5,2% medio, 66% de ventanas positivas** (estable en 5 semillas).
+  Honesto: el grueso del retorno viene de la exposición *long/flat* disciplinada al
+  índice; FinBERT (LLM) aporta un ~10% medible y la ventaja sobre el QQQ es
+  dependiente del régimen, **no** alpha sistemático.
+
+```bash
+# Reproducir el bot ML+LLM con noticias point-in-time
+PYTHONPATH=. python tools/build_news_sentiment.py        # FinBERT puntúa 61k titulares NASDAQ
+PYTHONPATH=. python tools/ml_llm_news_backtest.py --mode balanced --n-windows 10 --seed 42
+```
+
+---
+
 ## 🔬 Basado en Investigación
 
 El sistema está basado en papers de investigación de vanguardia:
