@@ -1,6 +1,6 @@
 # PROGRESS — Mejoras del bot (predicción + retorno)
 
-> **Source of truth:** este archivo. Cada item Tier X.Y se documenta aquí ANTES y DESPUÉS de mergear; sirve como handoff para sesiones futuras.
+> **Source of truth:** este archivo. Cada item Tier X.Y se documenta aquí antes y después de integrarlo.
 
 ## Convenciones
 
@@ -1835,5 +1835,18 @@ completo en `memoria/RESULTADOS_ML_LLM_NOTICIAS.md`.
 PYTHONPATH=. .venv/bin/python tools/build_news_sentiment.py
 PYTHONPATH=. .venv/bin/python tools/ml_llm_news_backtest.py --mode balanced --n-windows 10 --seed 42
 ```
+
+---
+
+## Tier 11 — Sugerencias externas (HRP y arbitraje de pares): PROBADAS y DESCARTADAS
+
+**Estado: RECHAZADAS ✗ — no mejoran los resultados. Código REVERTIDO (no integrado); queda solo esta constancia del experimento.**
+
+Dos palancas propuestas desde fuera del proyecto, implementadas y medidas con el protocolo del proyecto (flags OFF por default, A/B pareado con bootstrap CI seed=42, baseline reproducido EXACTO, sin look-ahead) y después **revertidas** por no aportar mejora.
+
+- **HRP (Hierarchical Risk Parity, López de Prado).** No aplica a la mejor config `faber_qqq_park` (mono-activo: mantiene QQQ o efectivo, nunca ≥2 posiciones → HRP no tiene cartera que repartir; la rama `index_trend` ni siquiera alcanza el código multi-activo). Donde sí aplica (`aggr_plus` multi-activo): recorta el peor drawdown (−5 a −14pp) a costa de un retorno equivalente, con Sharpe plano (mismo tradeoff que el inverse-vol/vol-target de la §5 de RESULTADOS_HONESTOS). Y `aggr_plus` ya es muy inferior a Faber-QQQ (en lockbox pierde a todos los plazos, bate al 60/40 el 0-3% vs 73-100% de Faber). La variante "literal" (HRP en co-entradas de la misma barra) es un no-op: el filtro de señal escalona las entradas.
+- **Arbitraje de pares (spread mean-reversion long/short).** Pierde dinero (−1.7% medio, Sharpe −0.30); significativamente peor que la estrategia direccional sobre el mismo universo de pares (Δ_Sharpe −0.69, Δret −7.4pp, IC95% < 0). El ML no aporta edge (con ML ≈ z-score puro, diferencia no significativa).
+
+Detalle en `memoria/RESULTADOS_HONESTOS.md` §11. Coherente con el hallazgo transversal del proyecto: el valor está en gestión de riesgo, no en generar alpha. **No se integra ninguna de las dos; el código del sistema queda como estaba.**
 
 ---

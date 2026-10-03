@@ -223,3 +223,36 @@ Coherente con las secciones 7-9 y la hipótesis del mercado eficiente.
 interno 2021-2023 (un único *bear*) y no el lockbox de precios 2024-2025. Con más
 historia de noticias (varios ciclos) podrían sacarse conclusiones de robustez más
 fuertes.
+
+## 11. Tier 11 — HRP y arbitraje estadístico de pares (PROBADAS y DESCARTADAS)
+
+Dos sugerencias externas, implementadas y medidas con el mismo rigor (A/B pareado,
+bootstrap CI, semilla fija, sin look-ahead) y **descartadas por no mejorar los
+resultados**. El código de ambas se **revirtió** tras medir (no se integró en el
+sistema); aquí queda la constancia del experimento.
+
+- **Hierarchical Risk Parity (HRP).** **No es aplicable** a la mejor config del
+  proyecto (`faber_qqq_park`): esa estrategia es *long/flat* sobre un único índice
+  (QQQ o efectivo), nunca mantiene una cartera de ≥2 posiciones, así que HRP no
+  tiene nada que repartir. Donde sí aplica (estrategia multi-activo `aggr_plus`),
+  HRP repite el patrón del "sizing por riesgo" de la §5: recorta el peor drawdown
+  (−5 a −14pp) pero baja el retorno en proporción parecida, sin mejorar el Sharpe.
+  Además la base `aggr_plus` ya es muy inferior a `faber_qqq_park` (peor DD −58/
+  −69% vs −22%; en lockbox pierde a todos los plazos y bate al 60/40 solo el 0-3%
+  frente al 73-100% de Faber). La versión *literal* del consejo (HRP sobre las
+  co-entradas de la misma barra) es además un no-op: el filtro de señal escalona
+  las entradas y casi nunca hay ≥2 candidatos simultáneos. **Conclusión: ninguna
+  versión de HRP mejora el mejor resultado.**
+- **Arbitraje estadístico de pares (spread mean-reversion, long/short).** Sobre
+  pares correlacionados (KO/PEP, GLD/SLV…), la estrategia market-neutral **pierde
+  dinero** (−1.7% medio, Sharpe −0.30) y es **significativamente peor** que la
+  estrategia direccional existente sobre los mismos activos (Δ_Sharpe −0.69,
+  Δretorno −7.4pp, ambos con IC95% < 0). Reutilizar los modelos ML (XGB/LGBM/RF)
+  sobre el target de reversión **no aporta edge**: con ML ≈ sin ML (z-score puro),
+  diferencia no significativa. Su único rasgo positivo es el drawdown bajo propio
+  de la neutralidad de mercado, pero perder despacio no es mejorar.
+
+Coherente con §5, §7, el Tier 8 y §10: ni el control de riesgo por correlación (HRP),
+ni el cambio de framing a pares, ni la reutilización de los modelos ML mejoran la
+rentabilidad ajustada a riesgo sobre el baseline. **Ambas se descartan; el código
+se revirtió y el sistema queda como estaba.**
