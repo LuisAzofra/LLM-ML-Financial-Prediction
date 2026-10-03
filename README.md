@@ -1,56 +1,58 @@
-# Estudio Prospectivo de LLMs y ML en Predicción Financiera
+# A Prospective Study of LLMs and ML for Financial Prediction
 
-## Trabajo Fin de Grado - Versión 2.0
+## Bachelor's Thesis (TFG) - Version 2.0
 
-**Sistema Híbrido con Datos Reales, LLM Gratuito y GARCH**
+**Hybrid System with Real Data, Free LLMs and GARCH**
 
-Este proyecto implementa un sistema híbrido completo que combina modelos de Machine Learning tradicionales, modelos GARCH para predicción de volatilidad, y un sistema multi-agente basado en LLMs gratuitos (Ollama/HuggingFace) para la predicción de activos financieros y criptoactivos.
+This project implements a complete hybrid system that combines traditional Machine Learning models, GARCH models for volatility forecasting, and a multi-agent system built on free LLMs (Ollama/Hugging Face) to predict financial assets and cryptoassets.
+
+> The thesis itself (`memoria/`) and the experiment logs are written in Spanish.
 
 ---
 
-## 🎯 Características Principales
+## 🎯 Key Features
 
-### ✅ Datos Reales (Sin Mocks)
-- **Precios históricos**: Yahoo Finance API
-- **Noticias financieras**: RSS feeds de fuentes reales (Yahoo Finance, MarketWatch, CoinDesk)
-- **Indicadores de sentimiento**: Fear & Greed Index
+### ✅ Real Data (No Mocks)
+- **Historical prices**: Yahoo Finance API
+- **Financial news**: RSS feeds from real sources (Yahoo Finance, MarketWatch, CoinDesk)
+- **Sentiment indicators**: Fear & Greed Index
 
-### ✅ LLM / NLP Gratuito
-- **FinBERT** (`ProsusAI/finbert`): modelo Transformer **finetuneado** sobre texto financiero — proveedor principal del agente de sentimiento (ver `utils/finbert_sentiment.py`)
-- **Ollama**: Ejecución local de Llama 3.2, Mistral
-- **Hugging Face**: API gratuita con rate limits
-- **Fallback**: Análisis basado en reglas si no hay LLM disponible
+### ✅ Free LLM / NLP
+- **FinBERT** (`ProsusAI/finbert`): Transformer model **fine-tuned** on financial text, the main provider of the sentiment agent (see `utils/finbert_sentiment.py`)
+- **Ollama**: local models (default `qwen2.5`)
+- **Hugging Face**: inference API
+- **Fallback**: rule-based analysis when no LLM is available
 
-### ✅ Predicción de Volatilidad Matemática
-- **GARCH(1,1)**: Modelo con fundamentos estadísticos sólidos
-- **EGARCH**: Captura efectos asimétricos
-- **Forecast con intervalos de confianza**
+### ✅ Mathematical Volatility Forecasting
+- **GARCH(1,1)**: statistically grounded model
+- **EGARCH**: captures asymmetric effects
+- **Forecasts with confidence intervals**
 
-### ✅ Sistema Multi-Agente
-- **TechnicalAnalystAgent**: Indicadores técnicos
-- **SentimentAnalystAgent**: Análisis de sentimiento con LLM real
+### ✅ Multi-Agent System
+- **TechnicalAnalystAgent**: technical indicators
+- **SentimentAnalystAgent**: sentiment analysis on real news
 - **RiskManagerAgent**: VaR, CVaR, GARCH, position sizing
-- **PortfolioManagerAgent**: LLM como intérprete
+- **PortfolioManagerAgent**: LLM as interpreter
 
-### ✅ Backtesting Económico Riguroso
-- **Métricas profesionales**: Sharpe, Sortino, Calmar, Ulcer Index
-- **Análisis de robustez por regímenes**
-- **Testing de sensibilidad a parámetros**
+### ✅ Rigorous Economic Backtesting
+- **Professional metrics**: Sharpe, Sortino, Calmar, Ulcer Index
+- **Robustness analysis across market regimes**
+- **Parameter sensitivity testing**
 
 ---
 
-## 📁 Estructura del Proyecto
+## 📁 Project Structure
 
 ```
 .
-├── api.py                      # Servidor Flask: API REST + sirve el frontend
-├── frontend/                   # Interfaz web (HTML/CSS/JS)
-├── main.py                     # Análisis completo por consola (genera results/)
-├── data/                       # Ingesta de datos
+├── api.py                      # Flask server: REST API + serves the frontend
+├── frontend/                   # Web UI (HTML/CSS/JS)
+├── main.py                     # Full console analysis (writes results/)
+├── data/                       # Data ingestion
 │   ├── data_loader.py          # Yahoo Finance
-│   ├── news_fetcher.py         # RSS feeds reales
-│   ├── news_sentiment_nasdaq.csv  # Sentimiento diario FinBERT (point-in-time)
-│   └── universe_snapshots/     # Constituyentes S&P 500 (test de supervivencia)
+│   ├── news_fetcher.py         # Real RSS feeds
+│   ├── news_sentiment_nasdaq.csv  # Daily FinBERT sentiment (point-in-time)
+│   └── universe_snapshots/     # S&P 500 constituents (survivorship test)
 ├── models/
 │   ├── ml_models/
 │   │   ├── traditional_ml.py   # RF, XGBoost, LightGBM
@@ -58,42 +60,42 @@ Este proyecto implementa un sistema híbrido completo que combina modelos de Mac
 │   │   ├── volatility_models.py # GARCH, EGARCH
 │   │   └── meta_labeling.py    # Meta-labeling (López de Prado)
 │   └── pattern_detection/
-│       └── chart_patterns.py   # Patrones chartistas
+│       └── chart_patterns.py   # Chart patterns
 ├── agents/
 │   ├── base_agent.py
-│   ├── debate.py               # Debate bull/bear + juez LLM
-│   ├── technical_agent/        # Análisis técnico
-│   ├── sentiment_agent/        # FinBERT/LLM + noticias reales
+│   ├── debate.py               # Bull/bear debate + LLM judge
+│   ├── technical_agent/        # Technical analysis
+│   ├── sentiment_agent/        # FinBERT/LLM + real news
 │   ├── risk_agent/             # GARCH + VaR
-│   └── manager_agent/          # LLM intérprete
-├── hybrid_system/              # Integración ML + LLM
-├── trading_bot/                # Bot de paper trading + risk gate
+│   └── manager_agent/          # LLM interpreter
+├── hybrid_system/              # ML + LLM integration
+├── trading_bot/                # Paper-trading bot + risk gate
 ├── evaluation/
-│   └── backtest.py             # Métricas económicas y robustez
-├── utils/                      # Cliente LLM, FinBERT, cachés, métricas, calibración
-├── tools/                      # Experimentos, barridos y dashboards reproducibles
-├── compare_*.py                # Comparativas A/B contra la API local
-├── tests/                      # Tests de causalidad (sin look-ahead) y meta-labeling
-├── notebooks/                  # Notebook de análisis
-├── memoria/                    # Memoria final (PDF), estado del arte y resultados honestos
-├── PROGRESS.md                 # Registro de cada experimento (Tiers 1-11)
+│   └── backtest.py             # Economic metrics and robustness
+├── utils/                      # LLM client, FinBERT, caches, metrics, calibration
+├── tools/                      # Reproducible experiments, sweeps and dashboards
+├── compare_*.py                # A/B comparisons against the local API
+├── tests/                      # Causality (no look-ahead) and meta-labeling tests
+├── notebooks/                  # Analysis notebook
+├── memoria/                    # Final thesis (PDF), state of the art and honest results
+├── PROGRESS.md                 # Log of every experiment (Tiers 1-11)
 └── requirements.txt
 ```
 
 ---
 
-## 🚀 Instalación
+## 🚀 Installation
 
-### 1. Clonar el repositorio
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/LuisAzofra/LLM-ML-Financial-Prediction.git
 cd LLM-ML-Financial-Prediction
 ```
 
-### 2. Crear entorno virtual
+### 2. Create a virtual environment
 
-Desarrollado y probado con Python 3.13.
+Developed and tested with Python 3.13.
 
 ```bash
 python -m venv .venv
@@ -101,54 +103,54 @@ source .venv/bin/activate  # Linux/Mac
 # .venv\Scripts\activate   # Windows
 ```
 
-### 3. Instalar dependencias
+### 3. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Instalar Ollama (opcional, para LLM local)
+### 4. Install Ollama (optional, for a local LLM)
 
 ```bash
 # Linux/Mac
 curl -fsSL https://ollama.com/install.sh | sh
 
-# Windows: Descargar desde https://ollama.com/download
+# Windows: download from https://ollama.com/download
 
-# Descargar modelo (por defecto el sistema usa qwen2.5)
+# Pull the model (the system uses qwen2.5 by default)
 ollama pull qwen2.5
 ```
 
-### 5. Verificar instalación
+### 5. Verify the installation
 
 ```bash
-python -c "import arch; import yfinance; print('✅ Todo instalado correctamente')"
+python -c "import arch; import yfinance; print('✅ All set')"
 ```
 
 ---
 
-## 📊 Uso
+## 📊 Usage
 
-### Interfaz web (API + frontend)
+### Web UI (API + frontend)
 
 ```bash
 python api.py              # http://localhost:5000
-PORT=5057 python api.py    # puerto usado por los scripts compare_*.py y tools/
+PORT=5057 python api.py    # port used by the compare_*.py and tools/ scripts
 ```
 
-### Análisis completo por consola
+### Full console analysis
 
 ```bash
 python main.py
 ```
 
-### Usar el notebook de análisis
+### Analysis notebook
 
 ```bash
 jupyter notebook notebooks/analisis_completo.ipynb
 ```
 
-### Ejemplo de uso programático
+### Programmatic example
 
 ```python
 from data.data_loader import FinancialDataLoader
@@ -156,68 +158,68 @@ from data.news_fetcher import NewsFetcher
 from models.ml_models.volatility_models import GARCHVolatilityModel
 from utils.llm_client import LLMClient
 
-# Cargar datos
+# Load data
 loader = FinancialDataLoader()
 df = loader.download_stock_data('AAPL', '2020-01-01', '2024-01-01')
 
-# Obtener noticias reales
+# Fetch real news
 fetcher = NewsFetcher()
 news = fetcher.fetch_yahoo_finance_news('AAPL', max_items=10)
 
-# Predecir volatilidad con GARCH
+# Forecast volatility with GARCH
 returns = df['Close'].pct_change().dropna().values
 garch = GARCHVolatilityModel(p=1, q=1)
 garch.fit(returns)
 forecast = garch.forecast(horizon=5)
-print(f"Volatilidad predicha: {forecast.forecast_value*100:.2f}%")
+print(f"Forecast volatility: {forecast.forecast_value*100:.2f}%")
 
-# Analizar sentimiento con LLM
+# Sentiment analysis with an LLM
 llm = LLMClient(provider="ollama")
 result = llm.analyze_sentiment("Apple reports record earnings...")
-print(f"Sentimiento: {result['parsed']['sentiment']}")
+print(f"Sentiment: {result['parsed']['sentiment']}")
 ```
 
 ---
 
-## 🔧 Configuración del LLM
+## 🔧 LLM Configuration
 
-El proveedor se elige con la variable de entorno `TFG_LLM_PROVIDER`:
+The provider is selected with the `TFG_LLM_PROVIDER` environment variable:
 
-| Proveedor | Modelo por defecto | Notas |
-|-----------|--------------------|-------|
-| `ollama` (default de la API) | `qwen2.5` | Requiere `ollama serve` en `localhost:11434` |
-| `local` | `Qwen/Qwen2.5-0.5B-Instruct` | `transformers` en local; cambiable con `TFG_LOCAL_LLM` |
-| `local-gguf` | Qwen2.5-1.5B-Instruct Q4 (GGUF) | Requiere `llama-cpp-python`; fichero en `TFG_LOCAL_GGUF_FILE` |
-| `huggingface` | `mistralai/Mistral-7B-Instruct-v0.2` | API de inferencia de Hugging Face; cambiable con `TFG_HF_MODEL` |
+| Provider | Default model | Notes |
+|----------|---------------|-------|
+| `ollama` (API default) | `qwen2.5` | Requires `ollama serve` on `localhost:11434` |
+| `local` | `Qwen/Qwen2.5-0.5B-Instruct` | Local `transformers`; override with `TFG_LOCAL_LLM` |
+| `local-gguf` | Qwen2.5-1.5B-Instruct Q4 (GGUF) | Requires `llama-cpp-python`; file set by `TFG_LOCAL_GGUF_FILE` |
+| `huggingface` | `mistralai/Mistral-7B-Instruct-v0.2` | Hugging Face inference API; override with `TFG_HF_MODEL` |
 
 ```bash
-ollama serve                                   # en una terminal
-TFG_LLM_PROVIDER=ollama python api.py          # en otra
+ollama serve                                   # in one terminal
+TFG_LLM_PROVIDER=ollama python api.py          # in another
 ```
 
-Otras variables útiles:
+Other useful variables:
 
-- `FINBERT_MODEL` (default `ProsusAI/finbert`): modelo de sentimiento financiero.
-- `TFG_LIGHTWEIGHT=1` / `TFG_DISABLE_TF=1`: arranque ligero sin TensorFlow (sin LSTM/GRU).
-- `PRICE_CACHE=1`: usa la caché local de precios (útil para tests reproducibles).
+- `FINBERT_MODEL` (default `ProsusAI/finbert`): financial sentiment model.
+- `TFG_LIGHTWEIGHT=1` / `TFG_DISABLE_TF=1`: lightweight start without TensorFlow (no LSTM/GRU).
+- `PRICE_CACHE=1`: use the local price cache (useful for reproducible tests).
 
-Si no hay LLM disponible, el sistema cae a análisis basado en reglas (VADER, palabras clave).
+If no LLM is available, the system falls back to rule-based analysis (VADER, keywords).
 
 ---
 
-## 📈 Métricas Implementadas
+## 📈 Implemented Metrics
 
-### Rendimiento
-- Retorno Total
-- Retorno Anualizado
+### Performance
+- Total Return
+- Annualized Return
 
-### Riesgo
-- Volatilidad Anualizada
+### Risk
+- Annualized Volatility
 - Maximum Drawdown
 - Ulcer Index
-- VaR y CVaR
+- VaR and CVaR
 
-### Riesgo-Ajustado
+### Risk-Adjusted
 - Sharpe Ratio
 - Sortino Ratio
 - Calmar Ratio
@@ -231,31 +233,29 @@ Si no hay LLM disponible, el sistema cae a análisis basado en reglas (VADER, pa
 
 ---
 
-## 📚 Memoria del TFG
+## 📚 Thesis Documents (Spanish)
 
-La memoria completa del TFG está disponible en:
-
-- **[Memoria final (PDF)](memoria/Memoria_TFG.pdf)**: Versión depositada en la ETSI Informáticos (junio 2026), con anexo de diseño de prompts y gestión de contexto de los agentes. Los experimentos con FinBERT, el bot ML+LLM con noticias y las palancas HRP/pares (Tiers 9-11) se documentan en los ficheros de abajo
-- **[Estado del Arte](memoria/ESTADO_DEL_ARTE.md)**: Revisión exhaustiva de la literatura científica 2024-2026
-- **[Memoria TFG](memoria/MEMORIA_TFG.md)**: Documento completo con diseño, implementación y resultados
-- **[Resultados honestos](memoria/RESULTADOS_HONESTOS.md)**: Evaluación sin look-ahead, OOS y lockbox
-- **[Bot ML+LLM con noticias](memoria/RESULTADOS_ML_LLM_NOTICIAS.md)**: FinBERT + RandomForest point-in-time
-- **[PROGRESS](PROGRESS.md)**: Registro de cada experimento, aceptado o descartado
+- **[Final thesis (PDF)](memoria/Memoria_TFG.pdf)**: version submitted to the ETSI Informáticos (June 2026), including an appendix on prompt design and agent context management. The FinBERT experiments, the ML+LLM news bot and the HRP/pairs levers (Tiers 9-11) are documented in the files below
+- **[State of the art](memoria/ESTADO_DEL_ARTE.md)**: review of the 2024-2026 scientific literature
+- **[Thesis (Markdown)](memoria/MEMORIA_TFG.md)**: design, implementation and results
+- **[Honest results](memoria/RESULTADOS_HONESTOS.md)**: evaluation without look-ahead, out-of-sample and lockbox
+- **[ML+LLM news bot](memoria/RESULTADOS_ML_LLM_NOTICIAS.md)**: point-in-time FinBERT + RandomForest
+- **[PROGRESS](PROGRESS.md)**: log of every experiment, accepted or rejected
 
 ---
 
 ## 🧪 Testing
 
-### Tests automáticos
+### Automated tests
 
-Verifican que no hay look-ahead (invariancia al truncar el histórico) y el meta-labeling:
+They check that there is no look-ahead (invariance when the history is truncated) and validate the meta-labeling:
 
 ```bash
 PYTHONPATH=. python tests/test_causality.py
 PYTHONPATH=. python tests/test_meta_labeling.py
 ```
 
-### Ejecutar tests de robustez
+### Robustness tests
 
 ```python
 from evaluation.backtest import Backtester, RobustnessTester
@@ -263,116 +263,116 @@ from evaluation.backtest import Backtester, RobustnessTester
 backtester = Backtester()
 robustness_tester = RobustnessTester(backtester)
 
-# Test por regímenes
+# Per-regime test
 regime_results = robustness_tester.test_regime_robustness(
     df, signal_generator, 'AAPL'
 )
 
-# Calcular score de robustez
+# Robustness score
 score = robustness_tester.calculate_robustness_score(regime_results)
-print(f"Score de robustez: {score['overall']:.2f}")
+print(f"Robustness score: {score['overall']:.2f}")
 ```
 
 ---
 
-## 📊 Resultados Esperados
+## 📊 Outputs
 
-`main.py` produce los siguientes outputs:
+`main.py` produces:
 
 ```
 results/
-├── REPORTE_FINAL_<SÍMBOLO>.txt  # Reporte detallado por activo
-├── backtest_analysis.png        # Gráficos de backtest
-└── price_chart.png              # Gráficos de precios
+├── REPORTE_FINAL_<SYMBOL>.txt   # Detailed report per asset
+├── backtest_analysis.png        # Backtest charts
+└── price_chart.png              # Price charts
 ```
 
-Los ficheros incluidos en `results/` y `RESUMEN_EJECUCION.txt` son una ejecución de
-ejemplo de la primera versión (febrero 2026). Los resultados actuales y rigurosos
-están en `memoria/RESULTADOS_HONESTOS.md`.
+The files committed in `results/` and `RESUMEN_EJECUCION.txt` are a sample run of the
+first version (February 2026). The current, rigorous results are in
+`memoria/RESULTADOS_HONESTOS.md`.
 
 ---
 
-## 📈 Resultados reales (evaluación honesta)
+## 📈 Real Results (Honest Evaluation)
 
-Evaluación rigurosa (sin look-ahead, fuera de muestra, *Deflated Sharpe*). Detalle
-completo en [`memoria/RESULTADOS_HONESTOS.md`](memoria/RESULTADOS_HONESTOS.md),
-[`memoria/RESULTADOS_ML_LLM_NOTICIAS.md`](memoria/RESULTADOS_ML_LLM_NOTICIAS.md) y
-[`PROGRESS.md`](PROGRESS.md) (Tiers 7-10).
+Rigorous evaluation (no look-ahead, out-of-sample, *Deflated Sharpe*). Full details in
+[`memoria/RESULTADOS_HONESTOS.md`](memoria/RESULTADOS_HONESTOS.md),
+[`memoria/RESULTADOS_ML_LLM_NOTICIAS.md`](memoria/RESULTADOS_ML_LLM_NOTICIAS.md) and
+[`PROGRESS.md`](PROGRESS.md) (Tiers 7-11).
 
-- **Hallazgo principal**: la sofisticación (ML + LLM + multi-agente) **no genera
-  alpha** sobre el indexado pasivo ajustando por riesgo — coherente con la
-  hipótesis del mercado eficiente. Resultado negativo válido y defendible.
-- **Bot ML+LLM con noticias reales *point-in-time* (FinBERT + RandomForest)** →
-  **retornos positivos *out-of-sample***. Entreno 2019-2020, test 2021-2023:
+- **Main finding**: the added sophistication (ML + LLM + multi-agent) **does not
+  generate alpha** over passive indexing on a risk-adjusted basis, consistent with
+  the efficient market hypothesis. A valid and defensible negative result.
+- **ML+LLM bot with real *point-in-time* news (FinBERT + RandomForest)** →
+  **positive *out-of-sample* returns**. Trained on 2019-2020, tested on 2021-2023:
 
-  | Plazo | ML+LLM (medio) | % ventanas positivas | QQQ comprar&mantener |
-  |-------|---------------:|:--------------------:|---------------------:|
-  | 1 mes  | +0,04% | 62% | −0,30% |
-  | 6 meses| +7,33% | 62% | +5,50% |
-  | 1 año  | +7,72% | 62% | +4,68% |
-  | 2 años | +5,72% | 75% | +0,84% |
+  | Horizon | ML+LLM (mean) | % positive windows | QQQ buy & hold |
+  |---------|--------------:|:------------------:|---------------:|
+  | 1 month  | +0.04% | 62% | −0.30% |
+  | 6 months | +7.33% | 62% | +5.50% |
+  | 1 year   | +7.72% | 62% | +4.68% |
+  | 2 years  | +5.72% | 75% | +0.84% |
 
-  Global OOS **+5,2% medio, 66% de ventanas positivas** (estable en 5 semillas).
-  Honesto: el grueso del retorno viene de la exposición *long/flat* disciplinada al
-  índice; FinBERT (LLM) aporta un ~10% medible y la ventaja sobre el QQQ es
-  dependiente del régimen, **no** alpha sistemático.
-- **Palancas descartadas**: HRP (Hierarchical Risk Parity) y arbitraje estadístico
-  de pares se implementaron y midieron con el mismo protocolo; ninguna mejora el
-  resultado y su código se revirtió (Tier 11, `RESULTADOS_HONESTOS.md` §11).
+  Overall OOS **+5.2% mean, 66% positive windows** (stable across 5 seeds).
+  Honestly: most of the return comes from disciplined *long/flat* exposure to the
+  index; FinBERT (LLM) contributes a measurable ~10%, and the edge over QQQ is
+  regime-dependent, **not** systematic alpha.
+- **Rejected levers**: HRP (Hierarchical Risk Parity) and statistical pairs
+  arbitrage were implemented and measured with the same protocol; neither improves
+  the result and their code was reverted (Tier 11, `RESULTADOS_HONESTOS.md` §11).
 
 ```bash
-# Reproducir el bot ML+LLM con noticias point-in-time
-PYTHONPATH=. python tools/build_news_sentiment.py        # FinBERT puntúa 61k titulares NASDAQ
+# Reproduce the ML+LLM bot with point-in-time news
+PYTHONPATH=. python tools/build_news_sentiment.py        # FinBERT scores 61k NASDAQ headlines
 PYTHONPATH=. python tools/ml_llm_news_backtest.py --mode balanced --n-windows 10 --seed 42
 ```
 
 ---
 
-## 🔬 Basado en Investigación
+## 🔬 Research Background
 
-El sistema está basado en papers de investigación de vanguardia:
+The system builds on recent research:
 
-1. **QuantAgents** (EMNLP 2025) - Multi-agent financial system [2]
-2. **HedgeAgents** - Balanced-aware multi-agent trading [3]
-3. **N-BEATS** - Neural basis expansion for time series [4]
-4. **GARCH** - Volatility clustering models [21]
+1. **QuantAgents** (EMNLP 2025) - Multi-agent financial system
+2. **HedgeAgents** (WWW 2025) - Balanced-aware multi-agent trading
+3. **N-BEATS** (ICLR 2020) - Neural basis expansion for time series
+4. **GARCH** (Engle, 1982) - Volatility clustering models
 
 ---
 
-## 🛠️ Tecnologías
+## 🛠️ Technologies
 
-| Tecnología | Propósito |
-|------------|-----------|
-| Python 3.13 | Lenguaje principal |
-| Flask | API REST + frontend |
-| pandas/numpy | Manipulación de datos |
+| Technology | Purpose |
+|------------|---------|
+| Python 3.13 | Main language |
+| Flask | REST API + frontend |
+| pandas/numpy | Data manipulation |
 | scikit-learn | Machine Learning |
 | xgboost/lightgbm | Gradient Boosting |
-| arch | Modelos GARCH |
-| yfinance | Datos financieros |
+| arch | GARCH models |
+| yfinance | Financial data |
 | feedparser | RSS feeds |
-| transformers + FinBERT | Sentimiento financiero finetuneado |
-| Ollama / llama-cpp-python | LLM local |
-| HuggingFace | LLM API gratuita |
+| transformers + FinBERT | Fine-tuned financial sentiment |
+| Ollama / llama-cpp-python | Local LLM |
+| Hugging Face | LLM inference API |
 
 ---
 
-## 📄 Licencia
+## 📄 License
 
-Este proyecto es de uso académico para el Trabajo Fin de Grado.
-
----
-
-## 👨‍💻 Autor
-
-**Luis Azofra Begara** ([@LuisAzofra](https://github.com/LuisAzofra)) — Trabajo Fin de Grado,
-Grado en Ingeniería Informática, ETSI Informáticos, Universidad Politécnica de Madrid.
+This project is for academic use as part of a Bachelor's Thesis.
 
 ---
 
-## 🙏 Agradecimientos
+## 👨‍💻 Author
+
+**Luis Azofra Begara** ([@LuisAzofra](https://github.com/LuisAzofra)) — Bachelor's Thesis,
+BSc in Computer Engineering, ETSI Informáticos, Universidad Politécnica de Madrid.
+
+---
+
+## 🙏 Acknowledgements
 
 - Universidad Politécnica de Madrid
-- Tutores académicos
-- Comunidad de código abierto
-- Autores de papers de investigación citados
+- Academic supervisors
+- The open-source community
+- The authors of the cited research papers
