@@ -75,7 +75,7 @@ Este proyecto implementa un sistema híbrido completo que combina modelos de Mac
 ├── compare_*.py                # Comparativas A/B contra la API local
 ├── tests/                      # Tests de causalidad (sin look-ahead) y meta-labeling
 ├── notebooks/                  # Notebook de análisis
-├── memoria/                    # Memoria, estado del arte y resultados honestos
+├── memoria/                    # Memoria final (PDF), estado del arte y resultados honestos
 ├── PROGRESS.md                 # Registro de cada experimento (Tiers 1-11)
 └── requirements.txt
 ```
@@ -235,6 +235,7 @@ Si no hay LLM disponible, el sistema cae a análisis basado en reglas (VADER, pa
 
 La memoria completa del TFG está disponible en:
 
+- **[Memoria final (PDF)](memoria/Memoria_TFG.pdf)**: Versión depositada en la ETSI Informáticos (junio 2026), con anexo de diseño de prompts y gestión de contexto de los agentes. Los experimentos con FinBERT, el bot ML+LLM con noticias y las palancas HRP/pares (Tiers 9-11) se documentan en los ficheros de abajo
 - **[Estado del Arte](memoria/ESTADO_DEL_ARTE.md)**: Revisión exhaustiva de la literatura científica 2024-2026
 - **[Memoria TFG](memoria/MEMORIA_TFG.md)**: Documento completo con diseño, implementación y resultados
 - **[Resultados honestos](memoria/RESULTADOS_HONESTOS.md)**: Evaluación sin look-ahead, OOS y lockbox
