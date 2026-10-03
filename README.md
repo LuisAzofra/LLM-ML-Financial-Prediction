@@ -1,4 +1,4 @@
-# A Prospective Study of LLMs and ML for Financial Prediction
+# Multi-Agent LLM Trading System: FinBERT, GARCH & Look-Ahead-Free Backtesting
 
 ## Bachelor's Thesis (TFG) - Version 2.0
 
