@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# Logs
+*.log
+api_log.txt
+flask_server.log
+flask_server_err.log
+
+# Sessions / runtime data
+sessions/
+*.session
+
+# Cache local (Tier 1.2: noticias SQLite — regenerable con tools/backfill_news.py)
+cache/
+*.db
+*.db-shm
+*.db-wal
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Claude Code settings (local)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
